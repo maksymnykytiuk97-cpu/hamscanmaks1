@@ -551,26 +551,252 @@ def scrape_saga_hamburg() -> List[str]:
     )
 
 
+def scrape_vonovia_hamburg() -> List[dict]:
+    """Vonovia Hamburg - DIRECT scraping (not via immomio).
+    Returns full apartment dicts with vonovia.de URLs."""
+    import time
+    apartments = []
+    
+    try:
+        from playwright.sync_api import sync_playwright
+        
+        with sync_playwright() as p:
+            browser = p.chromium.launch(
+                headless=True,
+                args=['--disable-blink-features=AutomationControlled', '--no-sandbox', '--disable-dev-shm-usage']
+            )
+            context = browser.new_context(
+                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
+                locale='de-DE',
+                viewport={'width': 1920, 'height': 1080}
+            )
+            context.add_init_script("Object.defineProperty(navigator, 'webdriver', { get: () => undefined });")
+            page = context.new_page()
+            
+            try:
+                # Search Hamburg with 25km radius
+                page.goto(
+                    'https://www.vonovia.de/zuhause-finden/immobilien?rentType=miete&latitude=53.6035393&longitude=9.9495941&perimeter=25&immoType=wohnung',
+                    timeout=60000, wait_until='networkidle'
+                )
+                time.sleep(8)
+                html = page.content()
+                
+                detail_paths = list(set(re.findall(r'href="(/zuhause-finden/immobilien/[^"]+)"', html)))
+                logger.info(f"Vonovia: found {len(detail_paths)} apartments")
+                
+                for path in detail_paths[:30]:
+                    try:
+                        detail_url = f'https://www.vonovia.de{path}'
+                        page.goto(detail_url, timeout=20000, wait_until='domcontentloaded')
+                        time.sleep(3)
+                        
+                        text = page.evaluate('document.body.innerText')
+                        dhtml = page.content()
+                        
+                        # Extract data from structured text
+                        title_match = re.search(r'^([^\n]+(?:Wohnung|Apartment)[^\n]*)', text, re.MULTILINE)
+                        title = title_match.group(1).strip() if title_match else 'Vonovia Wohnung Hamburg'
+                        
+                        # Address: "Streetname Nr - PLZ Hamburg ..."
+                        addr_match = re.search(r'([\w\.\-äöüÄÖÜß\s]+?\s+\d+[a-zA-Z]?)\s*-\s*(\d{5})\s+Hamburg(?:\s+OT\s+([\w\-äöüÄÖÜß]+))?', text)
+                        address = None
+                        district = None
+                        if addr_match:
+                            address = f"{addr_match.group(1).strip()}, {addr_match.group(2)} Hamburg"
+                            if addr_match.group(3):
+                                district = addr_match.group(3).strip()
+                                address += f" ({district})"
+                        
+                        # Price (Warmmiete preferred, fallback Kaltmiete)
+                        price = None
+                        warm_match = re.search(r'([\d.]+,\d{2})\s*€\s*\n?\s*Warmmiete', text)
+                        if warm_match:
+                            try:
+                                price = float(warm_match.group(1).replace('.', '').replace(',', '.'))
+                            except ValueError:
+                                pass
+                        if price is None:
+                            kalt_match = re.search(r'([\d.]+,\d{2})\s*€\s*\n?\s*Kaltmiete', text)
+                            if kalt_match:
+                                try:
+                                    price = float(kalt_match.group(1).replace('.', '').replace(',', '.'))
+                                except ValueError:
+                                    pass
+                        
+                        # Area
+                        area = None
+                        area_match = re.search(r'([\d.]+,\d+)\s*m²\s*\n?\s*Größe', text)
+                        if area_match:
+                            try:
+                                area = float(area_match.group(1).replace('.', '').replace(',', '.'))
+                            except ValueError:
+                                pass
+                        
+                        # Rooms
+                        rooms = None
+                        # Try "X,X Zimmer" or "X-Zimmer"
+                        rooms_match = re.search(r'([\d.]+,\d+|\d+)\s*\n?\s*Zimmer\s*\n', text)
+                        if rooms_match:
+                            try:
+                                rooms = float(rooms_match.group(1).replace(',', '.'))
+                            except ValueError:
+                                pass
+                        if rooms is None:
+                            t_rooms = re.search(r'(\d+(?:[,.]\d+)?)\s*[-\s]?Zimmer', title)
+                            if t_rooms:
+                                try:
+                                    rooms = float(t_rooms.group(1).replace(',', '.'))
+                                except ValueError:
+                                    pass
+                        
+                        # Image
+                        image_url = None
+                        img_match = re.search(r'src="(https://cdn\.expose\.vonovia\.de/[a-f0-9-]+\.(?:jpg|jpeg|png|webp)[^"]*)"', dhtml)
+                        if img_match:
+                            image_url = img_match.group(1).split('&amp;')[0]
+                        
+                        # Use URL path as unique ID
+                        listing_id = f"vonovia-{path.split('/')[-1]}"
+                        
+                        apartments.append({
+                            "id": listing_id,
+                            "title": title[:200],
+                            "price": price,
+                            "rooms": rooms,
+                            "area": area,
+                            "district": district,
+                            "address": address,
+                            "url": detail_url,
+                            "image_url": image_url,
+                            "landlord": "Vonovia",
+                            "found_at": datetime.now(timezone.utc),
+                            "status": "new"
+                        })
+                    except Exception as e:
+                        logger.debug(f"Vonovia detail error: {e}")
+                        continue
+            except Exception as e:
+                logger.error(f"Vonovia main error: {e}")
+            finally:
+                browser.close()
+        
+        logger.info(f"Vonovia: parsed {len(apartments)} apartments")
+    except Exception as e:
+        logger.error(f"Vonovia failed: {e}")
+    
+    return apartments
+
+
+def scrape_walddoerfer_direct() -> List[dict]:
+    """Walddörfer direct scraping (not via immomio)"""
+    import time
+    apartments = []
+    
+    try:
+        from playwright.sync_api import sync_playwright
+        
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True, args=['--no-sandbox', '--disable-dev-shm-usage'])
+            context = browser.new_context(
+                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
+                locale='de-DE'
+            )
+            page = context.new_page()
+            
+            try:
+                page.goto('https://www.walddoerfer.de/wohnungsangebote/aktuelle-angebote/', timeout=30000, wait_until='networkidle')
+                time.sleep(5)
+                html = page.content()
+                
+                # Find apartment cards - try various patterns
+                detail_paths = list(set(re.findall(r'href="(/wohnungsangebote/[a-z0-9\-]+/)"', html)))
+                detail_paths = [d for d in detail_paths if 'aktuelle-angebote' not in d]
+                
+                logger.info(f"Walddoerfer: found {len(detail_paths)} apartments")
+                
+                for path in detail_paths[:20]:
+                    try:
+                        detail_url = f'https://www.walddoerfer.de{path}'
+                        page.goto(detail_url, timeout=15000, wait_until='domcontentloaded')
+                        time.sleep(2)
+                        
+                        text = page.evaluate('document.body.innerText')
+                        dhtml = page.content()
+                        
+                        title_match = re.search(r'<h1[^>]*>([^<]+)</h1>', dhtml)
+                        title = title_match.group(1).strip() if title_match else 'Walddörfer Wohnung'
+                        
+                        # Hamburg check
+                        if 'Hamburg' not in text and 'Hamburg' not in title:
+                            continue
+                        
+                        addr_match = re.search(r'([\w\.\-äöüÄÖÜß\s]+\d+[a-zA-Z]?\s*,?\s*\d{5}\s+[\w\-äöüÄÖÜß]+)', text)
+                        address = addr_match.group(1).strip() if addr_match else None
+                        
+                        price_match = re.search(r'([\d.]+,\d{2})\s*€', text)
+                        price = None
+                        if price_match:
+                            try:
+                                price = float(price_match.group(1).replace('.', '').replace(',', '.'))
+                            except ValueError:
+                                pass
+                        
+                        area_match = re.search(r'([\d]+(?:,\d+)?)\s*m²', text)
+                        area = None
+                        if area_match:
+                            try:
+                                area = float(area_match.group(1).replace(',', '.'))
+                            except ValueError:
+                                pass
+                        
+                        rooms = None
+                        t_rooms = re.search(r'(\d+(?:[,.]\d+)?)\s*[-\s]?Zimmer', title + ' ' + text[:500])
+                        if t_rooms:
+                            try:
+                                rooms = float(t_rooms.group(1).replace(',', '.'))
+                            except ValueError:
+                                pass
+                        
+                        image_url = None
+                        img_match = re.search(r'<img[^>]+src="(https?://[^"]+\.(?:jpg|jpeg|png|webp))"', dhtml)
+                        if img_match:
+                            image_url = img_match.group(1)
+                        
+                        listing_id = f"walddoerfer-{path.strip('/').replace('/', '-')}"
+                        
+                        apartments.append({
+                            "id": listing_id,
+                            "title": title[:200],
+                            "price": price,
+                            "rooms": rooms,
+                            "area": area,
+                            "district": None,
+                            "address": address,
+                            "url": detail_url,
+                            "image_url": image_url,
+                            "landlord": "Walddörfer",
+                            "found_at": datetime.now(timezone.utc),
+                            "status": "new"
+                        })
+                    except Exception as e:
+                        logger.debug(f"Walddoerfer detail error: {e}")
+                        continue
+            except Exception as e:
+                logger.error(f"Walddoerfer main error: {e}")
+            finally:
+                browser.close()
+        
+        logger.info(f"Walddörfer: parsed {len(apartments)} apartments")
+    except Exception as e:
+        logger.error(f"Walddörfer failed: {e}")
+    
+    return apartments
+
+
 def scrape_walddoerfer() -> List[str]:
-    """Walddörfer - try to scrape with Playwright"""
-    return _scrape_landlord_pages(
-        start_url='https://www.walddoerfer.de/wohnungsangebote/aktuelle-angebote/',
-        detail_link_pattern=r'href="(/wohnungsangebote/[^"]+)"',
-        base_url='https://www.walddoerfer.de',
-        source_name='Walddoerfer',
-        max_pages=15
-    )
-
-
-def scrape_vonovia_hamburg() -> List[str]:
-    """Vonovia Hamburg - Updated URL"""
-    return _scrape_landlord_pages(
-        start_url='https://www.vonovia.de/zuhause-finden/immobilien?rentType=miete&latitude=53.6035393&longitude=9.9495941&perimeter=25&immoType=wohnung',
-        detail_link_pattern=r'href="(/zuhause-finden/immobilien/[^"]+)"',
-        base_url='https://www.vonovia.de',
-        source_name='Vonovia',
-        max_pages=25
-    )
+    """DEPRECATED - kept for compatibility, now returns empty"""
+    return []
 
 
 def search_google_for_immomio() -> List[str]:
@@ -644,19 +870,26 @@ async def scrape_immomio_hamburg():
             except Exception as e:
                 logger.debug(f"Token refresh for {name}: {e}")
         
-        # === STEP 3: Playwright scraping for SAGA, Vonovia, Walddoerfer (may be blocked by captcha) ===
+        # === STEP 3: SAGA via Playwright (immomio URLs only) ===
         all_urls = set()
+        try:
+            saga_urls = await asyncio.to_thread(scrape_saga_hamburg)
+            all_urls.update(saga_urls)
+        except Exception as e:
+            logger.error(f"SAGA scraper failed: {e}")
         
-        for scraper_fn, src_name in [
-            (scrape_saga_hamburg, 'SAGA'),
-            (scrape_vonovia_hamburg, 'Vonovia'),
-            (scrape_walddoerfer, 'Walddoerfer'),
-        ]:
-            try:
-                urls = await asyncio.to_thread(scraper_fn)
-                all_urls.update(urls)
-            except Exception as e:
-                logger.error(f"{src_name} scraper failed: {e}")
+        # === STEP 4: DIRECT scrapers (Vonovia, Walddörfer - no immomio) ===
+        try:
+            vonovia_apts = await asyncio.to_thread(scrape_vonovia_hamburg)
+            apartments.extend(vonovia_apts)
+        except Exception as e:
+            logger.error(f"Vonovia direct failed: {e}")
+        
+        try:
+            wald_apts = await asyncio.to_thread(scrape_walddoerfer_direct)
+            apartments.extend(wald_apts)
+        except Exception as e:
+            logger.error(f"Walddörfer direct failed: {e}")
         
         # === STEP 4: Manual URLs from database ===
         manual_urls = await db.manual_urls.find({}, {"_id": 0}).to_list(100)
@@ -752,27 +985,42 @@ async def scan_apartments():
         }
         await db.scan_logs.insert_one(scan_log)
         
-        # Send email to all users with notifications enabled
+        # Send email to all users with notifications enabled - filtered by their personal preferences
         if new_apartments and resend.api_key:
-            # Get all users with notifications enabled and email set
             users_to_notify = await db.users.find({
                 "notifications_enabled": True,
                 "notification_email": {"$ne": None, "$ne": ""}
-            }, {"notification_email": 1, "_id": 0}).to_list(1000)
+            }, {
+                "notification_email": 1, "min_price": 1, "max_price": 1, 
+                "min_rooms": 1, "max_rooms": 1, "_id": 0
+            }).to_list(1000)
             
-            recipients = [u['notification_email'] for u in users_to_notify if u.get('notification_email')]
-            
-            # Also include legacy global settings email if set
-            settings = await db.settings.find_one({}, {"_id": 0})
-            if settings and settings.get('email'):
-                if settings['email'] not in recipients:
-                    recipients.append(settings['email'])
-            
-            if recipients:
+            for user_prefs in users_to_notify:
+                email_addr = user_prefs.get('notification_email')
+                if not email_addr:
+                    continue
+                
+                # Filter apartments based on user's personal preferences
+                user_apts = []
+                for apt in new_apartments:
+                    if user_prefs.get('min_price') is not None and (apt.get('price') is None or apt['price'] < user_prefs['min_price']):
+                        continue
+                    if user_prefs.get('max_price') is not None and (apt.get('price') is None or apt['price'] > user_prefs['max_price']):
+                        continue
+                    if user_prefs.get('min_rooms') is not None and (apt.get('rooms') is None or apt['rooms'] < user_prefs['min_rooms']):
+                        continue
+                    if user_prefs.get('max_rooms') is not None and (apt.get('rooms') is None or apt['rooms'] > user_prefs['max_rooms']):
+                        continue
+                    user_apts.append(apt)
+                
+                if not user_apts:
+                    logger.info(f"No matching apartments for {email_addr} (filtered out)")
+                    continue
+                
                 try:
-                    html_content = f"<h2>🏠 {len(new_apartments)} neue Wohnungen in Hamburg gefunden!</h2>"
+                    html_content = f"<h2>🏠 {len(user_apts)} neue Wohnungen in Hamburg gefunden!</h2>"
                     html_content += "<ul>"
-                    for apt in new_apartments:
+                    for apt in user_apts:
                         html_content += f"<li><strong>{apt['title']}</strong><br>"
                         if apt.get('price'):
                             html_content += f"Preis: €{apt['price']:.2f}<br>"
@@ -787,21 +1035,16 @@ async def scan_apartments():
                         html_content += f"<a href='{apt['url']}'>Zur Anzeige</a></li><br>"
                     html_content += "</ul>"
                     
-                    # Send to each recipient
-                    for email_addr in recipients:
-                        try:
-                            params = {
-                                "from": SENDER_EMAIL,
-                                "to": [email_addr],
-                                "subject": f"🏠 {len(new_apartments)} neue Wohnungen in Hamburg",
-                                "html": html_content
-                            }
-                            await asyncio.to_thread(resend.Emails.send, params)
-                            logger.info(f"Email sent to {email_addr}")
-                        except Exception as e:
-                            logger.error(f"Failed to send email to {email_addr}: {str(e)}")
+                    params = {
+                        "from": SENDER_EMAIL,
+                        "to": [email_addr],
+                        "subject": f"🏠 {len(user_apts)} neue Wohnungen in Hamburg",
+                        "html": html_content
+                    }
+                    await asyncio.to_thread(resend.Emails.send, params)
+                    logger.info(f"Email sent to {email_addr} with {len(user_apts)} filtered apartments")
                 except Exception as e:
-                    logger.error(f"Failed to prepare emails: {str(e)}")
+                    logger.error(f"Failed to send email to {email_addr}: {str(e)}")
         
         scanning_state["last_scan"] = datetime.now(timezone.utc)
         scanning_state["next_scan"] = datetime.now(timezone.utc) + timedelta(minutes=3)
@@ -859,6 +1102,10 @@ async def get_me(current_user: dict = Depends(get_current_user)):
 class ProfileUpdate(BaseModel):
     notification_email: Optional[EmailStr] = None
     notifications_enabled: bool = False
+    min_price: Optional[float] = None
+    max_price: Optional[float] = None
+    min_rooms: Optional[float] = None
+    max_rooms: Optional[float] = None
 
 @api_router.get("/profile")
 async def get_profile(current_user: dict = Depends(get_current_user)):
@@ -867,13 +1114,21 @@ async def get_profile(current_user: dict = Depends(get_current_user)):
         "email": current_user["email"],
         "name": current_user.get("name"),
         "notification_email": current_user.get("notification_email") or current_user["email"],
-        "notifications_enabled": current_user.get("notifications_enabled", False)
+        "notifications_enabled": current_user.get("notifications_enabled", False),
+        "min_price": current_user.get("min_price"),
+        "max_price": current_user.get("max_price"),
+        "min_rooms": current_user.get("min_rooms"),
+        "max_rooms": current_user.get("max_rooms"),
     }
 
 @api_router.put("/profile")
 async def update_profile(profile: ProfileUpdate, current_user: dict = Depends(get_current_user)):
     update_data = {
-        "notifications_enabled": profile.notifications_enabled
+        "notifications_enabled": profile.notifications_enabled,
+        "min_price": profile.min_price,
+        "max_price": profile.max_price,
+        "min_rooms": profile.min_rooms,
+        "max_rooms": profile.max_rooms,
     }
     if profile.notification_email:
         update_data["notification_email"] = profile.notification_email

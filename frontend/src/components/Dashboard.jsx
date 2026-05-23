@@ -7,7 +7,6 @@ import FilterPanel from './FilterPanel';
 import ApartmentList from './ApartmentList';
 import { Toaster } from './ui/sonner';
 import { toast } from 'sonner';
-import { Gear, SignOut } from '@phosphor-icons/react';
 
 export default function Dashboard() {
   const { user, logout } = useAuth();
@@ -23,8 +22,30 @@ export default function Dashboard() {
     maxRooms: ''
   });
   const [loading, setLoading] = useState(true);
+  const [filtersLoaded, setFiltersLoaded] = useState(false);
+
+  // Load user's personal filters from profile on mount
+  useEffect(() => {
+    const loadFilters = async () => {
+      try {
+        const { data } = await api.get('/api/profile');
+        setFilters({
+          minPrice: data.min_price ?? '',
+          maxPrice: data.max_price ?? '',
+          minRooms: data.min_rooms ?? '',
+          maxRooms: data.max_rooms ?? '',
+        });
+      } catch (e) {
+        // Continue with default empty filters
+      } finally {
+        setFiltersLoaded(true);
+      }
+    };
+    loadFilters();
+  }, []);
 
   useEffect(() => {
+    if (!filtersLoaded) return;
     fetchApartments();
     fetchScanStatus();
     
@@ -35,23 +56,20 @@ export default function Dashboard() {
     
     return () => clearInterval(interval);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [view, filters]);
+  }, [view, filters, filtersLoaded]);
 
   const fetchApartments = async () => {
     try {
       const params = {};
       
-      if (filters.minPrice) params.min_price = parseFloat(filters.minPrice);
-      if (filters.maxPrice) params.max_price = parseFloat(filters.maxPrice);
-      if (filters.minRooms) params.min_rooms = parseFloat(filters.minRooms);
-      if (filters.maxRooms) params.max_rooms = parseFloat(filters.maxRooms);
+      if (filters.minPrice !== '' && filters.minPrice !== null) params.min_price = parseFloat(filters.minPrice);
+      if (filters.maxPrice !== '' && filters.maxPrice !== null) params.max_price = parseFloat(filters.maxPrice);
+      if (filters.minRooms !== '' && filters.minRooms !== null) params.min_rooms = parseFloat(filters.minRooms);
+      if (filters.maxRooms !== '' && filters.maxRooms !== null) params.max_rooms = parseFloat(filters.maxRooms);
       
-      if (view === 'new') {
-        params.status = 'new';
-      }
+      params.status = view === 'history' ? 'history' : 'new';
       
-      const endpoint = view === 'history' ? '/api/apartments/history' : '/api/apartments';
-      const response = await api.get(endpoint, { params });
+      const response = await api.get('/api/apartments', { params });
       setApartments(response.data);
       setLoading(false);
     } catch (error) {
@@ -81,7 +99,25 @@ export default function Dashboard() {
       toast.error(error.response?.data?.detail || 'Fehler beim Starten des Scans');
     }
   };
-
+  
+  // Save filters to user profile (debounced via explicit save)
+  const handleFiltersChange = async (newFilters) => {
+    setFilters(newFilters);
+    // Persist to profile
+    try {
+      await api.put('/api/profile', {
+        notification_email: user?.notification_email || user?.email,
+        notifications_enabled: user?.notifications_enabled ?? false,
+        min_price: newFilters.minPrice === '' ? null : parseFloat(newFilters.minPrice),
+        max_price: newFilters.maxPrice === '' ? null : parseFloat(newFilters.maxPrice),
+        min_rooms: newFilters.minRooms === '' ? null : parseFloat(newFilters.minRooms),
+        max_rooms: newFilters.maxRooms === '' ? null : parseFloat(newFilters.maxRooms),
+      });
+    } catch (e) {
+      // silent
+    }
+  };
+  
   const handleLogout = async () => {
     await logout();
     navigate('/login');
@@ -105,7 +141,7 @@ export default function Dashboard() {
           <div className="lg:col-span-3 border-r border-[#050505]">
             <FilterPanel 
               filters={filters}
-              setFilters={setFilters}
+              setFilters={handleFiltersChange}
               view={view}
               setView={setView}
             />

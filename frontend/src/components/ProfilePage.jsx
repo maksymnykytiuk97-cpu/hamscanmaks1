@@ -4,14 +4,16 @@ import { api, formatApiErrorDetail } from '@/lib/api';
 import { useAuth } from '@/contexts/AuthContext';
 import { Input } from './ui/input';
 import { Label } from './ui/label';
-import { Checkbox } from './ui/checkbox';
 import { 
   ArrowLeft, 
   EnvelopeSimple, 
   User as UserIcon,
   FloppyDisk,
   Bell,
-  BellSlash
+  BellSlash,
+  Funnel,
+  CurrencyDollar,
+  Bed
 } from '@phosphor-icons/react';
 import { toast, Toaster } from 'sonner';
 
@@ -21,7 +23,11 @@ export default function ProfilePage() {
   
   const [profile, setProfile] = useState({
     notification_email: '',
-    notifications_enabled: false
+    notifications_enabled: false,
+    min_price: '',
+    max_price: '',
+    min_rooms: '',
+    max_rooms: '',
   });
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -35,7 +41,11 @@ export default function ProfilePage() {
       const { data } = await api.get('/api/profile');
       setProfile({
         notification_email: data.notification_email || '',
-        notifications_enabled: data.notifications_enabled || false
+        notifications_enabled: data.notifications_enabled || false,
+        min_price: data.min_price ?? '',
+        max_price: data.max_price ?? '',
+        min_rooms: data.min_rooms ?? '',
+        max_rooms: data.max_rooms ?? '',
       });
       setLoading(false);
     } catch (e) {
@@ -48,7 +58,15 @@ export default function ProfilePage() {
     e.preventDefault();
     setSaving(true);
     try {
-      await api.put('/api/profile', profile);
+      const payload = {
+        notification_email: profile.notification_email,
+        notifications_enabled: profile.notifications_enabled,
+        min_price: profile.min_price === '' ? null : parseFloat(profile.min_price),
+        max_price: profile.max_price === '' ? null : parseFloat(profile.max_price),
+        min_rooms: profile.min_rooms === '' ? null : parseFloat(profile.min_rooms),
+        max_rooms: profile.max_rooms === '' ? null : parseFloat(profile.max_rooms),
+      };
+      await api.put('/api/profile', payload);
       await checkAuth();
       toast.success('Profil gespeichert');
     } catch (err) {
@@ -69,7 +87,6 @@ export default function ProfilePage() {
     <div className="min-h-screen bg-white">
       <Toaster position="top-right" />
       
-      {/* Header */}
       <div className="border-b border-[#050505] bg-white">
         <div className="px-8 py-6 flex items-center gap-4">
           <button
@@ -84,17 +101,16 @@ export default function ProfilePage() {
               MEIN PROFIL
             </h1>
             <p className="text-xs font-mono uppercase tracking-[0.2em] text-[#525252]">
-              E-MAIL BENACHRICHTIGUNGEN VERWALTEN
+              PERSÖNLICHE EINSTELLUNGEN
             </p>
           </div>
         </div>
       </div>
       
-      {/* Profile Form */}
-      <div className="max-w-2xl mx-auto p-8">
-        <div className="border border-[#050505] bg-white">
-          {/* Account Info Section */}
-          <div className="p-6 border-b border-[#050505] bg-[#F4F4F4]">
+      <div className="max-w-3xl mx-auto p-8">
+        <form onSubmit={handleSave} data-testid="profile-form" className="space-y-px bg-[#050505]">
+          {/* Account Info */}
+          <div className="bg-[#F4F4F4] p-6 border border-[#050505]">
             <h2 className="text-xl tracking-tight font-bold mb-4 flex items-center gap-2" style={{ fontFamily: 'Cabinet Grotesk' }}>
               <UserIcon weight="bold" size={20} />
               KONTO
@@ -111,15 +127,14 @@ export default function ProfilePage() {
             </div>
           </div>
           
-          {/* Notification Settings */}
-          <form onSubmit={handleSave} className="p-6" data-testid="profile-form">
+          {/* Notifications */}
+          <div className="bg-white p-6 border border-[#050505]">
             <h2 className="text-xl tracking-tight font-bold mb-4 flex items-center gap-2" style={{ fontFamily: 'Cabinet Grotesk' }}>
               <Bell weight="bold" size={20} />
               BENACHRICHTIGUNGEN
             </h2>
             
-            <div className="space-y-6">
-              {/* Notification Email */}
+            <div className="space-y-4">
               <div>
                 <Label className="text-xs font-mono uppercase tracking-[0.2em] mb-2 block">
                   BENACHRICHTIGUNGS E-MAIL
@@ -135,12 +150,8 @@ export default function ProfilePage() {
                     data-testid="notification-email-input"
                   />
                 </div>
-                <p className="text-xs text-[#525252] mt-2">
-                  An diese E-Mail werden Benachrichtigungen über neue Wohnungen gesendet.
-                </p>
               </div>
               
-              {/* Enable Notifications Checkbox */}
               <div className="border border-[#050505] bg-[#F4F4F4] p-4">
                 <label className="flex items-start gap-3 cursor-pointer" data-testid="notifications-toggle-label">
                   <input
@@ -160,38 +171,100 @@ export default function ProfilePage() {
                       E-MAIL BENACHRICHTIGUNGEN AKTIVIEREN
                     </p>
                     <p className="text-xs text-[#525252] mt-1">
-                      Aktivieren Sie diese Option, um automatisch E-Mails zu erhalten, wenn neue Wohnungen in Hamburg gefunden werden.
+                      Erhalten Sie automatische E-Mails über neue Wohnungen, die Ihren Filtern entsprechen.
                     </p>
                   </div>
                 </label>
               </div>
-              
-              {/* Status Indicator */}
-              <div className={`border border-[#050505] p-4 ${profile.notifications_enabled ? 'bg-[#00C950]/10' : 'bg-[#F4F4F4]'}`}>
-                <p className="text-xs font-mono uppercase tracking-[0.2em]">
-                  STATUS: {profile.notifications_enabled ? (
-                    <span className="text-[#00C950]">✓ AKTIV - SIE ERHALTEN BENACHRICHTIGUNGEN</span>
-                  ) : (
-                    <span className="text-[#525252]">PAUSIERT</span>
-                  )}
-                </p>
+            </div>
+          </div>
+          
+          {/* Personal Filters */}
+          <div className="bg-white p-6 border border-[#050505]">
+            <h2 className="text-xl tracking-tight font-bold mb-2 flex items-center gap-2" style={{ fontFamily: 'Cabinet Grotesk' }}>
+              <Funnel weight="bold" size={20} />
+              PERSÖNLICHE FILTER
+            </h2>
+            <p className="text-xs text-[#525252] mb-4">
+              Diese Filter gelten nur für Ihr Konto. Andere Benutzer haben ihre eigenen Filter.
+            </p>
+            
+            <div className="space-y-4">
+              {/* Price */}
+              <div>
+                <Label className="text-xs font-mono uppercase tracking-[0.2em] mb-2 block flex items-center gap-1">
+                  <CurrencyDollar weight="bold" size={14} />
+                  PREIS (€) - MIETE PRO MONAT
+                </Label>
+                <div className="grid grid-cols-2 gap-3">
+                  <Input
+                    type="number"
+                    value={profile.min_price}
+                    onChange={(e) => setProfile({ ...profile, min_price: e.target.value })}
+                    placeholder="Min (€)"
+                    className="rounded-none border-[#050505] bg-white font-mono"
+                    data-testid="profile-min-price"
+                  />
+                  <Input
+                    type="number"
+                    value={profile.max_price}
+                    onChange={(e) => setProfile({ ...profile, max_price: e.target.value })}
+                    placeholder="Max (€)"
+                    className="rounded-none border-[#050505] bg-white font-mono"
+                    data-testid="profile-max-price"
+                  />
+                </div>
               </div>
               
-              {/* Save Button */}
-              <button
-                type="submit"
-                disabled={saving}
-                className="w-full px-4 py-3 bg-[#002FA7] text-white rounded-none border border-[#050505] hover:bg-black transition-colors duration-150 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
-                data-testid="save-profile-button"
-              >
-                <FloppyDisk weight="bold" size={16} />
-                <span className="text-sm font-mono uppercase tracking-[0.2em]">
-                  {saving ? 'SPEICHERN...' : 'PROFIL SPEICHERN'}
-                </span>
-              </button>
+              {/* Rooms */}
+              <div>
+                <Label className="text-xs font-mono uppercase tracking-[0.2em] mb-2 block flex items-center gap-1">
+                  <Bed weight="bold" size={14} />
+                  ZIMMER
+                </Label>
+                <div className="grid grid-cols-2 gap-3">
+                  <Input
+                    type="number"
+                    step="0.5"
+                    value={profile.min_rooms}
+                    onChange={(e) => setProfile({ ...profile, min_rooms: e.target.value })}
+                    placeholder="Min"
+                    className="rounded-none border-[#050505] bg-white font-mono"
+                    data-testid="profile-min-rooms"
+                  />
+                  <Input
+                    type="number"
+                    step="0.5"
+                    value={profile.max_rooms}
+                    onChange={(e) => setProfile({ ...profile, max_rooms: e.target.value })}
+                    placeholder="Max"
+                    className="rounded-none border-[#050505] bg-white font-mono"
+                    data-testid="profile-max-rooms"
+                  />
+                </div>
+              </div>
+              
+              <p className="text-xs text-[#525252] italic">
+                Leere Felder = kein Filter. Beispiel: nur Max-Preis = 1500€ filtert Wohnungen bis 1500€.
+              </p>
             </div>
-          </form>
-        </div>
+          </div>
+          
+          {/* Save */}
+          <div className="bg-white p-6 border border-[#050505]">
+            <button
+              type="submit"
+              disabled={saving}
+              className="w-full px-4 py-3 bg-[#002FA7] text-white rounded-none border border-[#050505] hover:bg-black transition-colors duration-150 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+              data-testid="save-profile-button"
+            >
+              <FloppyDisk weight="bold" size={16} />
+              <span className="text-sm font-mono uppercase tracking-[0.2em]">
+                {saving ? 'SPEICHERN...' : 'PROFIL SPEICHERN'}
+              </span>
+            </button>
+          </div>
+        </form>
       </div>
     </div>
   );
