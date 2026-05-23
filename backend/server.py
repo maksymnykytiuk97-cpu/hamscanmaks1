@@ -332,7 +332,6 @@ def _scrape_landlord_pages(start_url: str, detail_link_pattern: str, base_url: s
                     '--disable-blink-features=AutomationControlled',
                     '--no-sandbox',
                     '--disable-dev-shm-usage',
-                    '--disable-features=IsolateOrigins,site-per-process',
                 ]
             )
             context = browser.new_context(
@@ -344,7 +343,6 @@ def _scrape_landlord_pages(start_url: str, detail_link_pattern: str, base_url: s
                     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
                 }
             )
-            # Anti-detection: hide webdriver flag
             context.add_init_script("""
                 Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
                 Object.defineProperty(navigator, 'languages', { get: () => ['de-DE', 'de', 'en'] });
@@ -356,15 +354,32 @@ def _scrape_landlord_pages(start_url: str, detail_link_pattern: str, base_url: s
             try:
                 page.goto(start_url, timeout=60000, wait_until='networkidle')
                 
-                # Wait for any captcha to resolve (Friendly Captcha solves automatically in ~2-10 seconds)
+                # Wait for Friendly Captcha to solve (auto, ~10s)
                 for _ in range(15):
                     time.sleep(2)
                     title = page.title()
                     if 'Bot check' not in title and 'Sicherheitspr' not in title:
                         break
                 
+                # Accept cookies via JS (multiple methods to be reliable)
+                try:
+                    page.evaluate("""
+                        () => {
+                            const buttons = document.querySelectorAll('button, a, span');
+                            for (const b of buttons) {
+                                const txt = (b.innerText || b.textContent || '').trim().toUpperCase();
+                                if (txt === 'ALLES AKZEPTIEREN' || txt === 'ALLE AKZEPTIEREN' || txt === 'ACCEPT ALL') {
+                                    b.click();
+                                    return;
+                                }
+                            }
+                        }
+                    """)
+                except Exception:
+                    pass
+                
                 # Extra wait for content to load via AJAX
-                page.wait_for_timeout(5000)
+                page.wait_for_timeout(6000)
                 html = page.content()
                 
                 # Find immomio links directly
@@ -407,6 +422,174 @@ def _scrape_landlord_pages(start_url: str, detail_link_pattern: str, base_url: s
         logger.error(f"{source_name} scraper failed: {str(e)}")
     
     return list(immomio_urls)
+
+
+def scrape_saga_direct() -> List[dict]:
+    """SAGA direct scraping - parses public short-term offers from saga.hamburg directly"""
+    import time, hashlib
+    apartments = []
+    
+    try:
+        from playwright.sync_api import sync_playwright
+        
+        with sync_playwright() as p:
+            browser = p.chromium.launch(
+                headless=True,
+                args=['--disable-blink-features=AutomationControlled', '--no-sandbox', '--disable-dev-shm-usage']
+            )
+            context = browser.new_context(
+                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
+                locale='de-DE', viewport={'width': 1920, 'height': 1080}
+            )
+            context.add_init_script("""
+                Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+                Object.defineProperty(navigator, 'languages', { get: () => ['de-DE', 'de', 'en'] });
+                window.chrome = { runtime: {}, app: {} };
+            """)
+            page = context.new_page()
+            
+            try:
+                page.goto('https://www.saga.hamburg/immobiliensuche?Kategorie=APARTMENT', timeout=60000, wait_until='networkidle')
+                
+                # Wait for captcha auto-solve
+                for _ in range(15):
+                    time.sleep(2)
+                    if 'Sicherheitspr' not in page.title() and 'Bot check' not in page.title():
+                        break
+                
+                # Accept cookies
+                try:
+                    page.evaluate("""
+                        () => {
+                            const buttons = document.querySelectorAll('button, a, span');
+                            for (const b of buttons) {
+                                const txt = (b.innerText || b.textContent || '').trim().toUpperCase();
+                                if (txt === 'ALLES AKZEPTIEREN' || txt === 'ALLE AKZEPTIEREN') {
+                                    b.click();
+                                    return;
+                                }
+                            }
+                        }
+                    """)
+                except Exception:
+                    pass
+                
+                page.wait_for_timeout(8000)
+                
+                html = page.content()
+                text = page.evaluate('document.body.innerText')
+                
+                # Check Ergebnisse count
+                erg_match = re.search(r'(\d+)\s*Ergebniss?', text)
+                if erg_match:
+                    count = int(erg_match.group(1))
+                    logger.info(f"SAGA: showing {count} Ergebnisse")
+                    if count == 0:
+                        return apartments
+                
+                # Find detail page paths - SAGA uses /immobiliensuche/{slug}
+                detail_paths = list(set(re.findall(r'href="(/immobiliensuche/[^"]+)"', html)))
+                # Filter out non-apartment pages
+                detail_paths = [d for d in detail_paths if not any(skip in d for skip in [
+                    'allgemein', 'Tipps', 'aktuelle_angebote', 'kontakt', 'wohnen-fuer',
+                    'aktuelle-neubauprojekte', '?'
+                ])]
+                
+                logger.info(f"SAGA: found {len(detail_paths)} potential detail pages")
+                
+                for path in detail_paths[:20]:
+                    try:
+                        detail_url = f'https://www.saga.hamburg{path}'
+                        page.goto(detail_url, timeout=20000, wait_until='domcontentloaded')
+                        time.sleep(3)
+                        
+                        dhtml = page.content()
+                        dtext = page.evaluate('document.body.innerText')
+                        
+                        # Skip if no apartment data
+                        if not any(k in dtext for k in ['Zimmer', '€', 'Wohnfläche', 'm²']):
+                            continue
+                        
+                        # Skip if same Hamburg city  
+                        if 'Hamburg' not in dtext:
+                            continue
+                        
+                        # First check for immomio link
+                        immomio_match = re.search(r'(https?://tenant\.immomio\.com/(?:de/)?apply/[a-f0-9-]+)', dhtml)
+                        if immomio_match:
+                            # Use immomio parser
+                            apt = parse_immomio_listing(immomio_match.group(1))
+                            if apt:
+                                apt['landlord'] = 'SAGA Hamburg'
+                                apartments.append(apt)
+                            continue
+                        
+                        # Otherwise parse SAGA page directly
+                        title_match = re.search(r'<h1[^>]*>([^<]+)</h1>', dhtml)
+                        title = title_match.group(1).strip() if title_match else 'SAGA Wohnung Hamburg'
+                        
+                        price_match = re.search(r'([\d.]+,\d{2})\s*€', dtext)
+                        price = None
+                        if price_match:
+                            try:
+                                price = float(price_match.group(1).replace('.', '').replace(',', '.'))
+                            except ValueError:
+                                pass
+                        
+                        area_match = re.search(r'([\d]+(?:,\d+)?)\s*m²', dtext)
+                        area = None
+                        if area_match:
+                            try:
+                                area = float(area_match.group(1).replace(',', '.'))
+                            except ValueError:
+                                pass
+                        
+                        rooms = None
+                        r_match = re.search(r'(\d+(?:[,.]\d+)?)\s*[-\s]?Zimmer', dtext)
+                        if r_match:
+                            try:
+                                rooms = float(r_match.group(1).replace(',', '.'))
+                            except ValueError:
+                                pass
+                        
+                        addr_match = re.search(r'([\w\.\-äöüÄÖÜß\s]+\d+[a-zA-Z]?,?\s*\d{5}\s+[\w\-äöüÄÖÜß]+)', dtext)
+                        address = addr_match.group(1).strip() if addr_match else None
+                        
+                        image_url = None
+                        img_match = re.search(r'<img[^>]+src="(https?://www\.saga\.hamburg/[^"]+\.(?:jpg|jpeg|png|webp))"', dhtml)
+                        if img_match:
+                            image_url = img_match.group(1)
+                        
+                        slug_hash = hashlib.md5(path.encode()).hexdigest()[:16]
+                        listing_id = f"saga-{slug_hash}"
+                        
+                        apartments.append({
+                            "id": listing_id,
+                            "title": title[:200],
+                            "price": price,
+                            "rooms": rooms,
+                            "area": area,
+                            "district": None,
+                            "address": address,
+                            "url": detail_url,
+                            "image_url": image_url,
+                            "landlord": "SAGA Hamburg",
+                            "found_at": datetime.now(timezone.utc),
+                            "status": "new"
+                        })
+                    except Exception as e:
+                        logger.debug(f"SAGA detail error: {e}")
+                        continue
+            except Exception as e:
+                logger.error(f"SAGA scrape error: {e}")
+            finally:
+                browser.close()
+        
+        logger.info(f"SAGA direct: parsed {len(apartments)} apartments")
+    except Exception as e:
+        logger.error(f"SAGA direct failed: {e}")
+    
+    return apartments
 
 
 # Immomio homepage tokens for landlords (extracted from their websites)
@@ -541,14 +724,8 @@ def extract_immomio_token_from_site(landlord_name: str, site_url: str) -> Option
 
 
 def scrape_saga_hamburg() -> List[str]:
-    """SAGA Hamburg - largest landlord (still tries detail pages, captcha may block)"""
-    return _scrape_landlord_pages(
-        start_url='https://www.saga.hamburg/immobiliensuche?Kategorie=APARTMENT&Stadt=Hamburg',
-        detail_link_pattern=r'href="(/immobiliensuche/immobilien-details/[^"]+)"',
-        base_url='https://www.saga.hamburg',
-        source_name='SAGA',
-        max_pages=30
-    )
+    """DEPRECATED - replaced by scrape_saga_direct(). Returns empty."""
+    return []
 
 
 def scrape_vonovia_hamburg() -> List[dict]:
@@ -981,13 +1158,15 @@ async def scrape_immomio_hamburg():
             except Exception as e:
                 logger.debug(f"Token refresh for {name}: {e}")
         
-        # === STEP 3: SAGA via Playwright (immomio URLs only) ===
-        all_urls = set()
+        # === STEP 3: SAGA direct scraping (returns apartment dicts) ===
         try:
-            saga_urls = await asyncio.to_thread(scrape_saga_hamburg)
-            all_urls.update(saga_urls)
+            saga_apts = await asyncio.to_thread(scrape_saga_direct)
+            apartments.extend(saga_apts)
         except Exception as e:
             logger.error(f"SAGA scraper failed: {e}")
+        
+        # all_urls used by manual URLs below
+        all_urls = set()
         
         # === STEP 4: DIRECT scrapers (Vonovia, Walddörfer - no immomio) ===
         try:
