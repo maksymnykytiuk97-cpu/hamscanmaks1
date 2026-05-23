@@ -58,6 +58,52 @@ export default function Dashboard() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [view, filters, filtersLoaded]);
 
+  // === Live updates via WebSocket ===
+  // The backend pushes `new_apartment` and `scan_finished` events. We refresh
+  // the listing on either, and show a toast on truly new apartments.
+  useEffect(() => {
+    if (!filtersLoaded) return;
+    const httpUrl = process.env.REACT_APP_BACKEND_URL || '';
+    const wsUrl = httpUrl.replace(/^http/, 'ws') + '/api/ws/apartments';
+    let ws;
+    let reconnectTimer;
+
+    const connect = () => {
+      try {
+        ws = new WebSocket(wsUrl);
+        ws.onmessage = (event) => {
+          try {
+            const msg = JSON.parse(event.data);
+            if (msg.type === 'new_apartment') {
+              const apt = msg.apartment || {};
+              toast.success(`🏠 Нова квартира: ${apt.title?.slice(0, 80) || 'без назви'}`);
+              fetchApartments();
+            } else if (msg.type === 'scan_finished') {
+              fetchScanStatus();
+              if (msg.new_count > 0) fetchApartments();
+            }
+          } catch (_) { /* ignore non-JSON */ }
+        };
+        ws.onclose = () => {
+          reconnectTimer = setTimeout(connect, 5000); // auto-reconnect
+        };
+        ws.onerror = () => { try { ws.close(); } catch (_) {} };
+      } catch (_) {
+        reconnectTimer = setTimeout(connect, 5000);
+      }
+    };
+    connect();
+
+    return () => {
+      clearTimeout(reconnectTimer);
+      if (ws) {
+        ws.onclose = null;
+        try { ws.close(); } catch (_) {}
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filtersLoaded]);
+
   const fetchApartments = async () => {
     try {
       const params = {};

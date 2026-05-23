@@ -4,7 +4,7 @@ from pathlib import Path
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
-from fastapi import FastAPI, APIRouter, HTTPException, Request, Response, Depends
+from fastapi import FastAPI, APIRouter, HTTPException, Request, Response, Depends, WebSocket, WebSocketDisconnect
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from bson import ObjectId
@@ -609,6 +609,9 @@ IMMOMIO_TOKENS = {
     'Hamburger Wohnen': 'eyJhbGciOiJIUzI1NiJ9.eyJjdXN0b21lcklkIjoxNDI3MzI5MjksImlkIjoxODcwMDEzMjAsImNyZWF0ZWQiOjE2NTc0NzYyMzg4Nzl9.C1vwdfjJ27h7-HWIvGKBrsgWGcj-8-ArzkiOKoBpSgs',
     'BDS Hamburg': 'eyJhbGciOiJIUzI1NiJ9.eyJjdXN0b21lcklkIjoyODYxOTA4ODMsImlkIjoyOTIxMTgyMzgsImNyZWF0ZWQiOjE2NjY1OTQ0NzE5OTJ9.l-IorHm_QkfJf7tidzsCoW9x9xeIk01uO8BbuzmJ6Bg',
     'VHW Hamburg': 'eyJhbGciOiJIUzI1NiJ9.eyJjdXN0b21lcklkIjoyNTQxMzQ1MDYsImlkIjoyNzI4MDEwODUsImNyZWF0ZWQiOjE2NjE5NDY5ODY1MDF9.fo3dJ4iNYF825tbg1E5C6q0mXbtbePO1LO3S_3_SEhM',
+    # Note: Walddörfer (customerId=1250590938) uses Immomio Tenant Pool registration
+    # only; they do NOT expose a public propertyList feed. They redirect interested
+    # applicants to immomio for registration, so we cannot scrape their listings via GraphQL.
 }
 
 
@@ -838,11 +841,18 @@ def scrape_vonovia_hamburg() -> List[dict]:
                                 except ValueError:
                                     pass
                         
-                        # Image
+                        # Image — try a few patterns in order of preference
                         image_url = None
-                        img_match = re.search(r'src="(https://cdn\.expose\.vonovia\.de/[a-f0-9-]+\.(?:jpg|jpeg|png|webp)[^"]*)"', dhtml)
-                        if img_match:
-                            image_url = img_match.group(1).split('&amp;')[0]
+                        for pat in (
+                            r'src="(https://cdn\.expose\.vonovia\.de/[^"]+\.(?:jpg|jpeg|png|webp)[^"]*)"',
+                            r'srcset="(https://cdn\.expose\.vonovia\.de/[^",\s]+)',
+                            r'<meta[^>]+property="og:image"[^>]+content="(https://[^"]+)"',
+                            r'src="(https://(?:cdn|images?)\.[^"]+\.(?:jpg|jpeg|png|webp)[^"]*)"',
+                        ):
+                            m = re.search(pat, dhtml)
+                            if m:
+                                image_url = m.group(1).split('&amp;')[0].split(' ')[0]
+                                break
                         
                         # Use URL path as unique ID
                         listing_id = f"vonovia-{path.split('/')[-1]}"
@@ -877,109 +887,10 @@ def scrape_vonovia_hamburg() -> List[dict]:
 
 
 def scrape_walddoerfer_direct() -> List[dict]:
-    """Walddörfer direct scraping (not via immomio)"""
-    import time
-    apartments = []
-    
-    try:
-        from playwright.sync_api import sync_playwright
-        
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True, args=['--no-sandbox', '--disable-dev-shm-usage'])
-            context = browser.new_context(
-                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
-                locale='de-DE'
-            )
-            page = context.new_page()
-            
-            try:
-                page.goto('https://www.walddoerfer.de/wohnungsangebote/aktuelle-angebote/', timeout=30000, wait_until='networkidle')
-                time.sleep(5)
-                html = page.content()
-                
-                # Find apartment cards - try various patterns
-                detail_paths = list(set(re.findall(r'href="(/wohnungsangebote/[a-z0-9\-]+/)"', html)))
-                detail_paths = [d for d in detail_paths if 'aktuelle-angebote' not in d]
-                
-                logger.info(f"Walddoerfer: found {len(detail_paths)} apartments")
-                
-                for path in detail_paths[:20]:
-                    try:
-                        detail_url = f'https://www.walddoerfer.de{path}'
-                        page.goto(detail_url, timeout=15000, wait_until='domcontentloaded')
-                        time.sleep(2)
-                        
-                        text = page.evaluate('document.body.innerText')
-                        dhtml = page.content()
-                        
-                        title_match = re.search(r'<h1[^>]*>([^<]+)</h1>', dhtml)
-                        title = title_match.group(1).strip() if title_match else 'Walddörfer Wohnung'
-                        
-                        # Hamburg check
-                        if 'Hamburg' not in text and 'Hamburg' not in title:
-                            continue
-                        
-                        addr_match = re.search(r'([\w\.\-äöüÄÖÜß\s]+\d+[a-zA-Z]?\s*,?\s*\d{5}\s+[\w\-äöüÄÖÜß]+)', text)
-                        address = addr_match.group(1).strip() if addr_match else None
-                        
-                        price_match = re.search(r'([\d.]+,\d{2})\s*€', text)
-                        price = None
-                        if price_match:
-                            try:
-                                price = float(price_match.group(1).replace('.', '').replace(',', '.'))
-                            except ValueError:
-                                pass
-                        
-                        area_match = re.search(r'([\d]+(?:,\d+)?)\s*m²', text)
-                        area = None
-                        if area_match:
-                            try:
-                                area = float(area_match.group(1).replace(',', '.'))
-                            except ValueError:
-                                pass
-                        
-                        rooms = None
-                        t_rooms = re.search(r'(\d+(?:[,.]\d+)?)\s*[-\s]?Zimmer', title + ' ' + text[:500])
-                        if t_rooms:
-                            try:
-                                rooms = float(t_rooms.group(1).replace(',', '.'))
-                            except ValueError:
-                                pass
-                        
-                        image_url = None
-                        img_match = re.search(r'<img[^>]+src="(https?://[^"]+\.(?:jpg|jpeg|png|webp))"', dhtml)
-                        if img_match:
-                            image_url = img_match.group(1)
-                        
-                        listing_id = f"walddoerfer-{path.strip('/').replace('/', '-')}"
-                        
-                        apartments.append({
-                            "id": listing_id,
-                            "title": title[:200],
-                            "price": price,
-                            "rooms": rooms,
-                            "area": area,
-                            "district": None,
-                            "address": address,
-                            "url": detail_url,
-                            "image_url": image_url,
-                            "landlord": "Walddörfer",
-                            "found_at": datetime.now(timezone.utc),
-                            "status": "new"
-                        })
-                    except Exception as e:
-                        logger.debug(f"Walddoerfer detail error: {e}")
-                        continue
-            except Exception as e:
-                logger.error(f"Walddoerfer main error: {e}")
-            finally:
-                browser.close()
-        
-        logger.info(f"Walddörfer: parsed {len(apartments)} apartments")
-    except Exception as e:
-        logger.error(f"Walddörfer failed: {e}")
-    
-    return apartments
+    """Walddörfer redirects everything to Immomio — the GraphQL path in
+    IMMOMIO_TOKENS handles their listings. The direct HTML scrape is a no-op.
+    """
+    return []
 
 
 def scrape_walddoerfer() -> List[str]:
@@ -988,113 +899,144 @@ def scrape_walddoerfer() -> List[str]:
 
 
 def scrape_gcv() -> List[dict]:
-    """GCV Verwaltungsgesellschaft - direct scraping of /angebote.php"""
-    import time, hashlib
-    apartments = []
-    
+    """
+    GCV Verwaltungsgesellschaft. The actual listings are not on gcv-gmbh.de —
+    that page only embeds an ImmoScout24 portfolio iframe
+    (portal.immobilienscout24.de/ergebnisliste/84239610).
+    We scrape the IS24 portal directly via plain HTTP.
+    """
+    from bs4 import BeautifulSoup
+    apartments: List[dict] = []
+    portal_url = 'https://portal.immobilienscout24.de/ergebnisliste/84239610'
     try:
-        from playwright.sync_api import sync_playwright
-        
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True, args=['--no-sandbox', '--disable-dev-shm-usage'])
-            context = browser.new_context(
-                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
-                locale='de-DE'
-            )
-            page = context.new_page()
-            
+        r = requests.get(
+            portal_url,
+            headers={
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                              'AppleWebKit/537.36 (KHTML, like Gecko) '
+                              'Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9',
+                'Accept-Language': 'de-DE,de;q=0.9',
+            },
+            timeout=20,
+        )
+        if r.status_code != 200:
+            logger.warning(f"GCV (IS24): status {r.status_code}")
+            return apartments
+
+        soup = BeautifulSoup(r.text, 'html.parser')
+        cards = soup.select('.result__list--element')
+        logger.info(f"GCV (IS24): found {len(cards)} cards")
+
+        for card in cards:
             try:
-                page.goto('https://www.gcv-gmbh.de/angebote.php', timeout=30000, wait_until='networkidle')
-                time.sleep(3)
-                html = page.content()
-                text = page.evaluate('document.body.innerText')
-                
-                # First check for immomio iframe/links
-                immomio_links = list(set(re.findall(r'https?://tenant\.immomio\.com/(?:de/)?apply/[a-f0-9-]+', html)))
-                iframe_match = re.search(r'homepage\.immomio\.com/de/properties\?token=([^"&\'\s]+)', html)
-                
-                if iframe_match:
-                    # Use GraphQL with this token
-                    token = iframe_match.group(1)
-                    gcv_apts = scrape_immomio_landlord_token('GCV Hamburg', token)
-                    apartments.extend(gcv_apts)
-                    logger.info(f"GCV: found immomio token, got {len(gcv_apts)} apartments")
-                elif immomio_links:
-                    # Parse each immomio link
-                    for link in immomio_links:
-                        apt = parse_immomio_listing(link)
-                        if apt:
-                            apt['landlord'] = 'GCV Hamburg'
-                            apartments.append(apt)
+                text = card.get_text(' ', strip=True)
+
+                # Skip commercial properties (Gastronomie, Büro, Lager …)
+                if any(kw in text for kw in [
+                    'Gastronomie', 'Gewerbe', 'Büro', 'Lager', 'Restaurant',
+                    'Imbiss', 'Halle', 'Gesamtfläche',
+                ]):
+                    continue
+                # Only Hamburg (some IS24 portfolios include neighbouring towns)
+                if 'Hamburg' not in text:
+                    continue
+
+                # Title comes from the second <a> tag (the linked title text).
+                # The class `.result__list__element__infos__list--title` is a
+                # label class used for "Kaltmiete"/"Wohnfläche"/"Zimmer" labels,
+                # NOT the listing title — so we use the <a> text instead.
+                title = None
+                title_links = [
+                    a for a in card.find_all('a', href=True)
+                    if a.get_text(' ', strip=True)
+                ]
+                if title_links:
+                    title = title_links[0].get_text(' ', strip=True)
+                if not title:
+                    title = 'GCV Wohnung'
+
+                # Detail link
+                a = card.find('a', href=True)
+                href = a['href'] if a else ''
+                if href.startswith('/'):
+                    detail_url = f'https://portal.immobilienscout24.de{href}'
                 else:
-                    # No immomio - check if page has actual apartment listings
-                    # Look for typical apartment indicators
-                    has_apartments = any(kw in text for kw in ['Zimmer', '€', 'm²', 'qm', 'Wohnfläche', 'Kaltmiete'])
-                    
-                    if has_apartments:
-                        # Try to extract apartment data from page directly
-                        # Split by common section delimiters
-                        sections = re.split(r'\n{2,}', text)
-                        for section in sections:
-                            if 'Zimmer' in section and ('€' in section or 'm²' in section):
-                                # Extract data
-                                title_match = re.search(r'^([^\n]{10,150})', section.strip())
-                                title = title_match.group(1).strip() if title_match else 'GCV Wohnung Hamburg'
-                                
-                                price_match = re.search(r'([\d.]+,\d{2})\s*€', section)
-                                price = None
-                                if price_match:
-                                    try:
-                                        price = float(price_match.group(1).replace('.', '').replace(',', '.'))
-                                    except ValueError:
-                                        pass
-                                
-                                area_match = re.search(r'([\d]+(?:,\d+)?)\s*m²', section)
-                                area = None
-                                if area_match:
-                                    try:
-                                        area = float(area_match.group(1).replace(',', '.'))
-                                    except ValueError:
-                                        pass
-                                
-                                rooms_match = re.search(r'(\d+(?:[,.]\d+)?)\s*[-\s]?Zimmer', section)
-                                rooms = None
-                                if rooms_match:
-                                    try:
-                                        rooms = float(rooms_match.group(1).replace(',', '.'))
-                                    except ValueError:
-                                        pass
-                                
-                                addr_match = re.search(r'([\w\.\-äöüÄÖÜß\s]+\d+[a-zA-Z]?,?\s*\d{5}\s+Hamburg)', section)
-                                address = addr_match.group(1).strip() if addr_match else None
-                                
-                                # Create stable ID from content
-                                content_hash = hashlib.md5(section[:300].encode()).hexdigest()[:16]
-                                listing_id = f"gcv-{content_hash}"
-                                
-                                apartments.append({
-                                    "id": listing_id,
-                                    "title": title[:200],
-                                    "price": price,
-                                    "rooms": rooms,
-                                    "area": area,
-                                    "district": None,
-                                    "address": address,
-                                    "url": "https://www.gcv-gmbh.de/angebote.php",
-                                    "image_url": None,
-                                    "landlord": "GCV Hamburg",
-                                    "found_at": datetime.now(timezone.utc),
-                                    "status": "new"
-                                })
+                    detail_url = href or portal_url
+                m = re.search(r'/expose/\d+/(\d+)', detail_url)
+                expose_id = m.group(1) if m else hashlib.md5(detail_url.encode()).hexdigest()[:10]
+
+                # Image (often //pictures.immobilienscout24.de/...)
+                image_url = None
+                img = card.find('img')
+                if img:
+                    src = img.get('src') or img.get('data-src') or ''
+                    if src.startswith('//'):
+                        src = f'https:{src}'
+                    if src.startswith('http'):
+                        image_url = src
+
+                # Price (Kaltmiete) — value may be "1.266,23" or "3.000"
+                price = None
+                m = re.search(r'Kaltmiete\s*€\s*([\d.]+(?:,\d+)?)', text)
+                if m:
+                    try:
+                        price = float(m.group(1).replace('.', '').replace(',', '.'))
+                    except ValueError:
+                        pass
+
+                # Area (Wohnfläche)
+                area = None
+                m = re.search(r'Wohnfläche\s*([\d.]+(?:,\d+)?)\s*m²', text)
+                if m:
+                    try:
+                        area = float(m.group(1).replace('.', '').replace(',', '.'))
+                    except ValueError:
+                        pass
+
+                # Rooms (number after "Zimmer")
+                rooms = None
+                m = re.search(r'Zimmer\s+([\d]+(?:[,.]\d+)?)', text)
+                if m:
+                    try:
+                        rooms = float(m.group(1).replace(',', '.'))
+                    except ValueError:
+                        pass
+
+                # Address (street, …, Hamburg-District, Deutschland)
+                address = None
+                district = None
+                m = re.search(
+                    r'([\w\.\-äöüÄÖÜß\s]+\d+[a-zA-Z]?),\s*Hamburg(?:,\s*([\w\-äöüÄÖÜß]+))?',
+                    text,
+                )
+                if m:
+                    address = f"{m.group(1).strip()}, Hamburg"
+                    if m.group(2):
+                        district = m.group(2).strip()
+
+                apartments.append({
+                    "id": f"gcv-{expose_id}",
+                    "title": title[:200],
+                    "price": price,
+                    "rooms": rooms,
+                    "area": area,
+                    "district": district,
+                    "address": address,
+                    "url": detail_url,
+                    "image_url": image_url,
+                    "landlord": "GCV Hamburg",
+                    "found_at": datetime.now(timezone.utc),
+                    "status": "new",
+                })
             except Exception as e:
-                logger.error(f"GCV scrape error: {e}")
-            finally:
-                browser.close()
-        
+                logger.debug(f"GCV card parse error: {e}")
+                continue
+
         logger.info(f"GCV: parsed {len(apartments)} apartments")
     except Exception as e:
         logger.error(f"GCV failed: {e}")
-    
+
     return apartments
 
 
@@ -1272,6 +1214,12 @@ async def scan_apartments():
                 await db.apartments.insert_one(apt_dict)
                 new_apartments.append(apt)
                 logger.info(f"New apartment found: {apt['title']}")
+                # Live push to all connected dashboards
+                try:
+                    payload_apt = {k: v for k, v in apt_dict.items() if k != '_id'}
+                    await ws_manager.broadcast({"type": "new_apartment", "apartment": payload_apt})
+                except Exception as e:
+                    logger.debug(f"WS broadcast new_apartment failed: {e}")
             else:
                 # Update existing data if we now have more info
                 update_fields = {}
@@ -1355,6 +1303,18 @@ async def scan_apartments():
         
         scanning_state["last_scan"] = datetime.now(timezone.utc)
         scanning_state["next_scan"] = datetime.now(timezone.utc) + timedelta(minutes=3)
+
+        # Notify dashboards that a scan just finished
+        try:
+            await ws_manager.broadcast({
+                "type": "scan_finished",
+                "found_count": total_found,
+                "new_count": len(new_apartments),
+                "last_scan": scanning_state["last_scan"].isoformat(),
+                "next_scan": scanning_state["next_scan"].isoformat(),
+            })
+        except Exception as e:
+            logger.debug(f"WS broadcast scan_finished failed: {e}")
     
     except Exception as e:
         logger.error(f"Error during scan: {str(e)}")
@@ -1622,6 +1582,54 @@ class SettingsModel(BaseModel):
 async def save_settings(settings: SettingsModel, current_user: dict = Depends(get_current_user)):
     await db.settings.update_one({}, {"$set": settings.model_dump()}, upsert=True)
     return {"message": "Settings saved"}
+
+
+# ============= WEBSOCKET (live updates) =============
+
+class _ConnectionManager:
+    """Manages all active WebSocket clients and broadcasts apartment events."""
+    def __init__(self) -> None:
+        self.active: List[WebSocket] = []
+
+    async def connect(self, ws: WebSocket) -> None:
+        await ws.accept()
+        self.active.append(ws)
+
+    def disconnect(self, ws: WebSocket) -> None:
+        if ws in self.active:
+            self.active.remove(ws)
+
+    async def broadcast(self, payload: dict) -> None:
+        dead: List[WebSocket] = []
+        for ws in self.active:
+            try:
+                await ws.send_json(payload)
+            except Exception:
+                dead.append(ws)
+        for ws in dead:
+            self.disconnect(ws)
+
+
+ws_manager = _ConnectionManager()
+
+
+@app.websocket("/api/ws/apartments")
+async def apartments_ws(websocket: WebSocket):
+    """Live channel: emits {type:'new_apartment', apartment:{...}} when a
+    brand-new listing is inserted, plus {type:'scan_finished', ...} after
+    every scan. No auth required (read-only, public listing data)."""
+    await ws_manager.connect(websocket)
+    try:
+        # Send a hello so the client can confirm the connection is live
+        await websocket.send_json({"type": "hello", "ts": datetime.now(timezone.utc).isoformat()})
+        while True:
+            # Keep the socket alive; we ignore any client messages
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        ws_manager.disconnect(websocket)
+    except Exception as e:
+        logger.debug(f"WebSocket error: {e}")
+        ws_manager.disconnect(websocket)
 
 # ============= APP SETUP =============
 
