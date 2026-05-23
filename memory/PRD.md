@@ -36,15 +36,24 @@
 - Admin: `admin@hamburg-scanner.com` / `admin123`
 
 ## Currently Mocked / Pending
-- ⚠️ **Resend API key пустой** - email уведомления не работают пока пользователь не добавит ключ
-- ⚠️ **SAGA scraper находит 0 URLs** - SAGA меняет структуру/защита, но manual URLs работают идеально
-- ⚠️ **DuckDuckGo search** возвращает 0 результатов (Google не индексирует apply pages)
+- ✅ Resend API key настроен — email уведомления работают
+- ✅ **SAGA scraper працює** (2026-02): обхід bot-check через PoW + bypass Friendly Captcha
+- ⚠️ DuckDuckGo search возвращает 0 результатов (Google не индексирует apply pages) — не критично, основні скрапери покривають усе
+
+## CHANGELOG
+- **2026-02-23** SAGA scraper фіксовано:
+  - Видалено залежність від Tor/Playwright для SAGA
+  - Реалізовано прямий обхід SAGA bot-check через `requests`:
+    1. PoW challenge (`?create_challenge` → solve SHA256 → `?verify_challenge`)
+    2. Friendly Captcha bypass (POST `/captcha-validate` з порожнім solution → success)
+    3. XHR fetch listings (`X-Requested-With: XMLHttpRequest`)
+  - Парсить картки `#APARTMENT-card-N` з data-rooms / data-livingSpace / data-fullCosts
+  - Результат: 2 SAGA квартири (Moorburg, Bramfeld) тепер в БД та UI
 
 ## P0 / P1 / P2 Backlog
-- [P0] Получить Resend API key для email уведомлений
-- [P1] Улучшить SAGA scraper - возможно через альтернативные landlord порталы (Vonovia, Deutsche Wohnen)
-- [P1] Добавить Telegram bot integration для уведомлений
+- [P1] Refactor `server.py` (~1700 рядків) → routes/models/scrapers/notifications
+- [P1] Додати Telegram bot integration для уведомлень
 - [P2] Brute-force protection на /api/auth/login
-- [P2] Добавить графики статистики (квартиры по дням)
+- [P2] Графіки статистики (квартири по днях)
 - [P2] Push notifications через Web Push API
 - [P2] Filter by district (multi-select)

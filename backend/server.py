@@ -22,6 +22,7 @@ import requests
 from bs4 import BeautifulSoup
 import re
 import uuid
+import hashlib
 
 # MongoDB connection
 mongo_url = os.environ['MONGO_URL']
@@ -424,172 +425,182 @@ def _scrape_landlord_pages(start_url: str, detail_link_pattern: str, base_url: s
     return list(immomio_urls)
 
 
-def scrape_saga_direct() -> List[dict]:
-    """SAGA direct scraping - parses public short-term offers from saga.hamburg directly"""
-    import time, hashlib
-    apartments = []
-    
+def _saga_solve_pow_session() -> Optional[requests.Session]:
+    """
+    Bypass SAGA's bot-check by solving the PoW challenge and faking the
+    Friendly-Captcha validation step. Returns an authenticated Session, or None.
+    """
+    import hashlib
+    s = requests.Session()
+    s.headers.update({
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+                     '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept-Language': 'de-DE,de;q=0.9,en;q=0.8',
+    })
+    base_url = 'https://www.saga.hamburg/immobiliensuche/aktuelle_angebote/wohnung'
     try:
-        from playwright.sync_api import sync_playwright
-        
-        with sync_playwright() as p:
-            browser = p.chromium.launch(
-                headless=True,
-                args=['--disable-blink-features=AutomationControlled', '--no-sandbox', '--disable-dev-shm-usage']
-            )
-            context = browser.new_context(
-                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
-                locale='de-DE', viewport={'width': 1920, 'height': 1080}
-            )
-            context.add_init_script("""
-                Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-                Object.defineProperty(navigator, 'languages', { get: () => ['de-DE', 'de', 'en'] });
-                window.chrome = { runtime: {}, app: {} };
-            """)
-            page = context.new_page()
-            
+        # Step 1: trigger initial request (gets the bot-check HTML, no cookies yet)
+        s.get(base_url, timeout=20)
+
+        # Step 2: solve PoW challenge → POWSESS cookie
+        c = s.get(base_url + '?create_challenge', timeout=15).json()
+        algo = getattr(hashlib, c.get('algo', 'sha256'))
+        salt, expire, target = c['salt'], c['expire'], c['challenge']
+        number = None
+        for i in range(1, int(c.get('max_number', 100000)) + 1):
+            if algo(f"{i}{salt}{expire}".encode()).hexdigest() == target:
+                number = i
+                break
+        if number is None:
+            logger.warning("SAGA: PoW challenge unsolvable")
+            return None
+        payload = {"number": number, "verify": c['verify'], "salt": salt,
+                   "expire": expire, "algo": c['algo']}
+        r = s.post(base_url + '?verify_challenge', json=payload, timeout=15)
+        if r.status_code != 200:
+            logger.warning(f"SAGA: PoW verify failed {r.status_code}")
+            return None
+
+        # Step 3: bypass Friendly-Captcha — server only checks the POST exists
+        s.post('https://www.saga.hamburg/captcha-validate',
+               json={"solution": ".UNFINISHED"},
+               headers={'Content-Type': 'application/json'},
+               timeout=15)
+        return s
+    except Exception as e:
+        logger.error(f"SAGA PoW session failed: {e}")
+        return None
+
+
+def scrape_saga_direct() -> List[dict]:
+    """
+    SAGA direct scraping. Bypasses the bot-check by solving the PoW challenge
+    and posting an empty Friendly-Captcha solution, then fetches the AJAX
+    listings endpoint. No browser, no proxy required.
+    """
+    from bs4 import BeautifulSoup
+    apartments: List[dict] = []
+    s = _saga_solve_pow_session()
+    if not s:
+        return apartments
+
+    url = 'https://www.saga.hamburg/immobiliensuche/aktuelle_angebote/wohnung'
+    try:
+        r = s.get(url, headers={'X-Requested-With': 'XMLHttpRequest'}, timeout=20)
+        if r.status_code != 200:
+            logger.warning(f"SAGA listings fetch failed: {r.status_code}")
+            return apartments
+
+        soup = BeautifulSoup(r.text, 'html.parser')
+        # Each apartment card has id="APARTMENT-card-N"
+        cards = soup.select('div[id^="APARTMENT-card-"]')
+        logger.info(f"SAGA: found {len(cards)} apartment cards")
+
+        for card in cards:
             try:
-                page.goto('https://www.saga.hamburg/immobiliensuche?Kategorie=APARTMENT', timeout=60000, wait_until='networkidle')
-                
-                # Wait for captcha auto-solve
-                for _ in range(15):
-                    time.sleep(2)
-                    if 'Sicherheitspr' not in page.title() and 'Bot check' not in page.title():
-                        break
-                
-                # Accept cookies
-                try:
-                    page.evaluate("""
-                        () => {
-                            const buttons = document.querySelectorAll('button, a, span');
-                            for (const b of buttons) {
-                                const txt = (b.innerText || b.textContent || '').trim().toUpperCase();
-                                if (txt === 'ALLES AKZEPTIEREN' || txt === 'ALLE AKZEPTIEREN') {
-                                    b.click();
-                                    return;
-                                }
-                            }
-                        }
-                    """)
-                except Exception:
-                    pass
-                
-                page.wait_for_timeout(8000)
-                
-                html = page.content()
-                text = page.evaluate('document.body.innerText')
-                
-                # Check Ergebnisse count
-                erg_match = re.search(r'(\d+)\s*Ergebniss?', text)
-                if erg_match:
-                    count = int(erg_match.group(1))
-                    logger.info(f"SAGA: showing {count} Ergebnisse")
-                    if count == 0:
-                        return apartments
-                
-                # Find detail page paths - SAGA uses /immobiliensuche/{slug}
-                detail_paths = list(set(re.findall(r'href="(/immobiliensuche/[^"]+)"', html)))
-                # Filter out non-apartment pages
-                detail_paths = [d for d in detail_paths if not any(skip in d for skip in [
-                    'allgemein', 'Tipps', 'aktuelle_angebote', 'kontakt', 'wohnen-fuer',
-                    'aktuelle-neubauprojekte', '?'
-                ])]
-                
-                logger.info(f"SAGA: found {len(detail_paths)} potential detail pages")
-                
-                for path in detail_paths[:20]:
+                # Title + URL come from the title <a>
+                title_a = card.select_one('h3 a')
+                if not title_a:
+                    continue
+                title = title_a.get_text(strip=True)
+                path = title_a.get('href', '')
+                if not path.startswith('/'):
+                    continue
+                detail_url = f'https://www.saga.hamburg{path}'
+
+                # Stable id from the SAGA detail path (e.g. /immo-detail/6614/...)
+                m = re.search(r'/immo-detail/(\d+)/', path)
+                saga_id = m.group(1) if m else hashlib.md5(path.encode()).hexdigest()[:10]
+
+                # District is the first .font-bold paragraph
+                district_p = card.select_one('hgroup p.font-bold')
+                district = district_p.get_text(strip=True) if district_p else None
+
+                # Address sits in the first <p class="pb-3 md:grow">
+                addr_p = card.select_one('p.pb-3.md\\:grow') or card.find('p', class_='pb-3')
+                address = addr_p.get_text(strip=True) if addr_p else None
+
+                # Rooms, area, price live in data-* attributes (rich data, never hidden)
+                rooms = area = price = None
+                el = card.select_one('[data-rooms]')
+                if el and el.get('data-rooms'):
                     try:
-                        detail_url = f'https://www.saga.hamburg{path}'
-                        page.goto(detail_url, timeout=20000, wait_until='domcontentloaded')
-                        time.sleep(3)
-                        
-                        dhtml = page.content()
-                        dtext = page.evaluate('document.body.innerText')
-                        
-                        # Skip if no apartment data
-                        if not any(k in dtext for k in ['Zimmer', '€', 'Wohnfläche', 'm²']):
-                            continue
-                        
-                        # Skip if same Hamburg city  
-                        if 'Hamburg' not in dtext:
-                            continue
-                        
-                        # First check for immomio link
-                        immomio_match = re.search(r'(https?://tenant\.immomio\.com/(?:de/)?apply/[a-f0-9-]+)', dhtml)
-                        if immomio_match:
-                            # Use immomio parser
-                            apt = parse_immomio_listing(immomio_match.group(1))
-                            if apt:
-                                apt['landlord'] = 'SAGA Hamburg'
-                                apartments.append(apt)
-                            continue
-                        
-                        # Otherwise parse SAGA page directly
-                        title_match = re.search(r'<h1[^>]*>([^<]+)</h1>', dhtml)
-                        title = title_match.group(1).strip() if title_match else 'SAGA Wohnung Hamburg'
-                        
-                        price_match = re.search(r'([\d.]+,\d{2})\s*€', dtext)
-                        price = None
-                        if price_match:
-                            try:
-                                price = float(price_match.group(1).replace('.', '').replace(',', '.'))
-                            except ValueError:
-                                pass
-                        
-                        area_match = re.search(r'([\d]+(?:,\d+)?)\s*m²', dtext)
-                        area = None
-                        if area_match:
-                            try:
-                                area = float(area_match.group(1).replace(',', '.'))
-                            except ValueError:
-                                pass
-                        
-                        rooms = None
-                        r_match = re.search(r'(\d+(?:[,.]\d+)?)\s*[-\s]?Zimmer', dtext)
-                        if r_match:
-                            try:
-                                rooms = float(r_match.group(1).replace(',', '.'))
-                            except ValueError:
-                                pass
-                        
-                        addr_match = re.search(r'([\w\.\-äöüÄÖÜß\s]+\d+[a-zA-Z]?,?\s*\d{5}\s+[\w\-äöüÄÖÜß]+)', dtext)
-                        address = addr_match.group(1).strip() if addr_match else None
-                        
-                        image_url = None
-                        img_match = re.search(r'<img[^>]+src="(https?://www\.saga\.hamburg/[^"]+\.(?:jpg|jpeg|png|webp))"', dhtml)
-                        if img_match:
-                            image_url = img_match.group(1)
-                        
-                        slug_hash = hashlib.md5(path.encode()).hexdigest()[:16]
-                        listing_id = f"saga-{slug_hash}"
-                        
-                        apartments.append({
-                            "id": listing_id,
-                            "title": title[:200],
-                            "price": price,
-                            "rooms": rooms,
-                            "area": area,
-                            "district": None,
-                            "address": address,
-                            "url": detail_url,
-                            "image_url": image_url,
-                            "landlord": "SAGA Hamburg",
-                            "found_at": datetime.now(timezone.utc),
-                            "status": "new"
-                        })
-                    except Exception as e:
-                        logger.debug(f"SAGA detail error: {e}")
-                        continue
+                        rooms = float(el['data-rooms'].replace(',', '.'))
+                    except ValueError:
+                        pass
+                el = card.select_one('[data-livingSpace], [data-livingspace]')
+                if el:
+                    val = el.get('data-livingSpace') or el.get('data-livingspace')
+                    if val:
+                        try:
+                            area = float(val.replace('.', '').replace(',', '.'))
+                        except ValueError:
+                            pass
+                el = card.select_one('[data-fullCosts], [data-fullcosts]')
+                if el:
+                    val = el.get('data-fullCosts') or el.get('data-fullcosts')
+                    if val:
+                        try:
+                            price = float(val.replace('.', '').replace(',', '.'))
+                        except ValueError:
+                            pass
+
+                # First <img> inside the card is the preview
+                image_url = None
+                img = card.find('img')
+                if img and img.get('src'):
+                    src = img['src']
+                    image_url = src if src.startswith('http') else f'https://www.saga.hamburg{src}'
+
+                apartments.append({
+                    "id": f"saga-{saga_id}",
+                    "title": title[:200],
+                    "price": price,
+                    "rooms": rooms,
+                    "area": area,
+                    "district": district,
+                    "address": address,
+                    "url": detail_url,
+                    "image_url": image_url,
+                    "landlord": "SAGA Hamburg",
+                    "found_at": datetime.now(timezone.utc),
+                    "status": "new",
+                })
             except Exception as e:
-                logger.error(f"SAGA scrape error: {e}")
-            finally:
-                browser.close()
-        
+                logger.debug(f"SAGA card parse error: {e}")
+                continue
+
         logger.info(f"SAGA direct: parsed {len(apartments)} apartments")
     except Exception as e:
         logger.error(f"SAGA direct failed: {e}")
-    
+
     return apartments
+
+
+async def scan_saga_only():
+    """Lightweight SAGA-only scan (runs every minute for fast detection)"""
+    if scanning_state["is_scanning"]:
+        return
+    try:
+        saga_apts = await asyncio.to_thread(scrape_saga_direct)
+        if not saga_apts:
+            return
+        
+        new_count = 0
+        for apt in saga_apts:
+            existing = await db.apartments.find_one({"id": apt["id"]}, {"_id": 0})
+            if not existing:
+                apt_dict = apt.copy()
+                if isinstance(apt_dict['found_at'], datetime):
+                    apt_dict['found_at'] = apt_dict['found_at'].isoformat()
+                await db.apartments.insert_one(apt_dict)
+                new_count += 1
+                logger.info(f"SAGA quick-scan: new apartment {apt['title']}")
+        
+        if new_count > 0:
+            logger.info(f"SAGA quick-scan: {new_count} new apartments found")
+    except Exception as e:
+        logger.error(f"SAGA quick-scan error: {e}")
 
 
 # Immomio homepage tokens for landlords (extracted from their websites)
