@@ -4,6 +4,7 @@ import Dashboard from "@/components/Dashboard";
 import LoginPage from "@/components/LoginPage";
 import AdminPanel from "@/components/AdminPanel";
 import ProfilePage from "@/components/ProfilePage";
+import StatsPage from "@/components/StatsPage";
 import ProtectedRoute from "@/components/ProtectedRoute";
 import { AuthProvider } from "@/contexts/AuthContext";
 
@@ -29,6 +30,14 @@ function App() {
                   <ProfilePage />
                 </ProtectedRoute>
               } 
+            />
+            <Route
+              path="/stats"
+              element={
+                <ProtectedRoute>
+                  <StatsPage />
+                </ProtectedRoute>
+              }
             />
             <Route 
               path="/admin" 

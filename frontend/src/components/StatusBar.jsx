@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
-import { Broadcast, Clock, Buildings, Gear, SignOut, User as UserIcon } from '@phosphor-icons/react';
+import { Broadcast, Clock, Buildings, Gear, SignOut, User as UserIcon, ChartBar } from '@phosphor-icons/react';
 
-export default function StatusBar({ scanStatus, onScanNow, user, onLogout, onAdminClick, onProfileClick }) {
+export default function StatusBar({ scanStatus, onScanNow, user, onLogout, onAdminClick, onProfileClick, onStatsClick }) {
   const [countdown, setCountdown] = useState(180);
 
   useEffect(() => {
@@ -111,6 +111,15 @@ export default function StatusBar({ scanStatus, onScanNow, user, onLogout, onAdm
               {user?.notifications_enabled && (
                 <span className="w-2 h-2 bg-[#00C950] rounded-full animate-pulse" />
               )}
+            </button>
+
+            <button
+              onClick={onStatsClick}
+              className="px-4 py-2 bg-white text-[#050505] rounded-none border border-[#050505] hover:bg-[#F4F4F4] transition-colors duration-150 flex items-center gap-2"
+              data-testid="stats-button"
+            >
+              <ChartBar weight="bold" size={16} />
+              <span className="text-xs font-mono uppercase tracking-[0.2em]">STATISTIK</span>
             </button>
             
             <button

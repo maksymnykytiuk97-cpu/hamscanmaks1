@@ -609,9 +609,10 @@ IMMOMIO_TOKENS = {
     'Hamburger Wohnen': 'eyJhbGciOiJIUzI1NiJ9.eyJjdXN0b21lcklkIjoxNDI3MzI5MjksImlkIjoxODcwMDEzMjAsImNyZWF0ZWQiOjE2NTc0NzYyMzg4Nzl9.C1vwdfjJ27h7-HWIvGKBrsgWGcj-8-ArzkiOKoBpSgs',
     'BDS Hamburg': 'eyJhbGciOiJIUzI1NiJ9.eyJjdXN0b21lcklkIjoyODYxOTA4ODMsImlkIjoyOTIxMTgyMzgsImNyZWF0ZWQiOjE2NjY1OTQ0NzE5OTJ9.l-IorHm_QkfJf7tidzsCoW9x9xeIk01uO8BbuzmJ6Bg',
     'VHW Hamburg': 'eyJhbGciOiJIUzI1NiJ9.eyJjdXN0b21lcklkIjoyNTQxMzQ1MDYsImlkIjoyNzI4MDEwODUsImNyZWF0ZWQiOjE2NjE5NDY5ODY1MDF9.fo3dJ4iNYF825tbg1E5C6q0mXbtbePO1LO3S_3_SEhM',
-    # Note: Walddörfer (customerId=1250590938) uses Immomio Tenant Pool registration
-    # only; they do NOT expose a public propertyList feed. They redirect interested
-    # applicants to immomio for registration, so we cannot scrape their listings via GraphQL.
+    # Walddörfer's iframe loads after cookie consent and uses this homepage token
+    # (customerId=1250590938). The page also exposes a Tenant Pool registration
+    # token, which we do NOT use — only this one queries propertyList.
+    'Walddörfer': 'eyJhbGciOiJIUzI1NiJ9.eyJjdXN0b21lcklkIjoxMjUwNTkwOTM4LCJpZCI6MTI1NzM3OTYyMywiY3JlYXRlZCI6MTczOTQ0OTkyNjQwOX0.veqPULd54M9ruMr8OeqWmMaYH0cCm3PWahPvyRne9NE',
 }
 
 
@@ -1557,6 +1558,55 @@ async def trigger_scan(current_user: dict = Depends(get_current_user)):
         raise HTTPException(status_code=400, detail="Scan already in progress")
     asyncio.create_task(scan_apartments())
     return {"message": "Scan started"}
+
+
+@api_router.get("/stats/daily")
+async def get_daily_stats(
+    days: int = 30,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Daily apartment counts for the last `days` days, broken down by landlord.
+    Returns a list of points: {date: 'YYYY-MM-DD', total: N, byLandlord: {SAGA: 1, ...}}
+    Always returns a continuous range (zero-padded for days with no findings).
+    """
+    days = max(1, min(days, 90))
+    now = datetime.now(timezone.utc)
+    start = (now - timedelta(days=days - 1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    start_iso = start.isoformat()
+
+    # found_at is stored as an ISO string (see scan_apartments). Substring the
+    # first 10 chars (YYYY-MM-DD) to bucket by day.
+    pipeline = [
+        {"$match": {"found_at": {"$gte": start_iso}}},
+        {"$group": {
+            "_id": {
+                "date": {"$substr": ["$found_at", 0, 10]},
+                "landlord": {"$ifNull": ["$landlord", "Unbekannt"]},
+            },
+            "count": {"$sum": 1},
+        }},
+    ]
+
+    buckets: dict[str, dict] = {}
+    async for row in db.apartments.aggregate(pipeline):
+        date = row["_id"]["date"]
+        landlord = row["_id"]["landlord"]
+        b = buckets.setdefault(date, {"total": 0, "byLandlord": {}})
+        b["total"] += row["count"]
+        b["byLandlord"][landlord] = b["byLandlord"].get(landlord, 0) + row["count"]
+
+    # Continuous range — fill empty days with zeros so the chart x-axis is even
+    points = []
+    for i in range(days):
+        d = (start + timedelta(days=i)).strftime("%Y-%m-%d")
+        info = buckets.get(d, {"total": 0, "byLandlord": {}})
+        points.append({"date": d, "total": info["total"], "byLandlord": info["byLandlord"]})
+
+    # Collect set of landlords seen in the window (for chart legend / stacks)
+    landlords = sorted({l for p in points for l in p["byLandlord"]})
+
+    return {"days": days, "points": points, "landlords": landlords}
 
 @api_router.post("/apartments/{apartment_id}/mark-seen")
 async def mark_apartment_seen(apartment_id: str, current_user: dict = Depends(get_current_user)):
