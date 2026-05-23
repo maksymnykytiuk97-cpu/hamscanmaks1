@@ -112,6 +112,80 @@ class TestApartments:
         assert r.status_code == 200
         assert isinstance(r.json(), list)
 
+    # --- New: multi-landlord (GraphQL) real-data assertions ---
+    def test_apartments_count_at_least_12(self, admin_session):
+        r = admin_session.get(f"{BASE_URL}/api/apartments", timeout=20)
+        assert r.status_code == 200
+        apts = r.json()
+        assert len(apts) >= 12, f"Expected >=12 apartments, got {len(apts)}"
+
+    def test_apartments_have_required_fields(self, admin_session):
+        r = admin_session.get(f"{BASE_URL}/api/apartments", timeout=20)
+        assert r.status_code == 200
+        apts = r.json()
+        assert apts, "no apartments returned"
+        required_present = ["title", "url"]
+        for apt in apts:
+            for f in required_present:
+                assert apt.get(f), f"Missing field {f} in apt {apt.get('id')}"
+            assert isinstance(apt.get("url"), str)
+            # immomio apply URL pattern
+            assert "tenant.immomio.com/apply/" in apt["url"], f"Unexpected URL: {apt['url']}"
+
+    def test_apartments_multiple_landlords(self, admin_session):
+        r = admin_session.get(f"{BASE_URL}/api/apartments", timeout=20)
+        assert r.status_code == 200
+        apts = r.json()
+        landlords = {a.get("landlord") for a in apts if a.get("landlord")}
+        # expect at least 3 of the 4 known GraphQL landlords
+        expected = {"BGFG", "Hamburger Wohnen", "BDS Hamburg", "VHW Hamburg"}
+        overlap = landlords & expected
+        assert len(overlap) >= 3, f"Expected >=3 known landlords, got {landlords}"
+
+    def test_apartments_rooms_can_be_float(self, admin_session):
+        r = admin_session.get(f"{BASE_URL}/api/apartments", timeout=20)
+        assert r.status_code == 200
+        apts = r.json()
+        # rooms should be numeric (float allowed). Verify no parking (rooms==0) leaks through.
+        for a in apts:
+            if a.get("rooms") is not None:
+                assert isinstance(a["rooms"], (int, float))
+                assert a["rooms"] > 0, f"rooms==0 leaked (parking?) for {a.get('id')}"
+
+    def test_filter_min_price(self, admin_session):
+        r = admin_session.get(f"{BASE_URL}/api/apartments", params={"min_price": 500}, timeout=20)
+        assert r.status_code == 200
+        for a in r.json():
+            if a.get("price") is not None:
+                assert a["price"] >= 500
+
+    def test_filter_max_price(self, admin_session):
+        r = admin_session.get(f"{BASE_URL}/api/apartments", params={"max_price": 1500}, timeout=20)
+        assert r.status_code == 200
+        for a in r.json():
+            if a.get("price") is not None:
+                assert a["price"] <= 1500
+
+    def test_filter_rooms_float_range(self, admin_session):
+        r = admin_session.get(
+            f"{BASE_URL}/api/apartments",
+            params={"min_rooms": 1, "max_rooms": 2.5},
+            timeout=20,
+        )
+        assert r.status_code == 200
+        for a in r.json():
+            if a.get("rooms") is not None:
+                assert 1 <= a["rooms"] <= 2.5
+
+
+# ---------- Scan status reflects multi-landlord data ----------
+class TestScanStatusCount:
+    def test_total_apartments_at_least_12(self, admin_session):
+        r = admin_session.get(f"{BASE_URL}/api/scan-status", timeout=15)
+        assert r.status_code == 200
+        d = r.json()
+        assert d["total_apartments"] >= 12, f"total_apartments={d['total_apartments']}"
+
 
 # ---------- Scan endpoints ----------
 class TestScan:

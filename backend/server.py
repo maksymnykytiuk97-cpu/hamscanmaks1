@@ -390,8 +390,139 @@ def _scrape_landlord_pages(start_url: str, detail_link_pattern: str, base_url: s
     return list(immomio_urls)
 
 
+# Immomio homepage tokens for landlords (extracted from their websites)
+IMMOMIO_TOKENS = {
+    'BGFG': 'eyJhbGciOiJIUzI1NiJ9.eyJjdXN0b21lcklkIjoxNTY2MDQwMzUsImlkIjoxNzA2MDA0NjIsImNyZWF0ZWQiOjE2NDIxNjYwNDY2Mzh9.1QlkdnxWyyJMcRS1JubN1EkDrHPRaqfASe6oUJq7ptU',
+    'Hamburger Wohnen': 'eyJhbGciOiJIUzI1NiJ9.eyJjdXN0b21lcklkIjoxNDI3MzI5MjksImlkIjoxODcwMDEzMjAsImNyZWF0ZWQiOjE2NTc0NzYyMzg4Nzl9.C1vwdfjJ27h7-HWIvGKBrsgWGcj-8-ArzkiOKoBpSgs',
+    'BDS Hamburg': 'eyJhbGciOiJIUzI1NiJ9.eyJjdXN0b21lcklkIjoyODYxOTA4ODMsImlkIjoyOTIxMTgyMzgsImNyZWF0ZWQiOjE2NjY1OTQ0NzE5OTJ9.l-IorHm_QkfJf7tidzsCoW9x9xeIk01uO8BbuzmJ6Bg',
+    'VHW Hamburg': 'eyJhbGciOiJIUzI1NiJ9.eyJjdXN0b21lcklkIjoyNTQxMzQ1MDYsImlkIjoyNzI4MDEwODUsImNyZWF0ZWQiOjE2NjE5NDY5ODY1MDF9.fo3dJ4iNYF825tbg1E5C6q0mXbtbePO1LO3S_3_SEhM',
+}
+
+
+def scrape_immomio_landlord_token(landlord_name: str, token: str) -> List[dict]:
+    """Fetch all apartments for a landlord using their immomio GraphQL token"""
+    apartments = []
+    
+    query = """
+    query propertyList($input: HomepagePropertySearchRequest!) {
+      propertyList(input: $input) {
+        page { totalElements totalPages }
+        nodes {
+          name totalRooms size totalRentGross propertyType marketingType externalId applicationLink
+          titleImage { url }
+          address { city street houseNumber zipCode district }
+        }
+      }
+    }
+    """
+    
+    try:
+        variables = {
+            "input": {
+                "page": 0,
+                "size": 100,
+                "token": token,
+                "propertyType": None,
+                "wbs": None,
+                "barrierFree": None,
+                "balconyOrTerrace": None,
+                "roomNumber": {"from": None, "to": None},
+                "floor": {"from": None, "to": None},
+                "totalRentGross": {"from": None, "to": None}
+            }
+        }
+        
+        response = requests.post(
+            'https://gql-hp.immomio.com/homepage/graphql',
+            json={'query': query, 'variables': variables, 'operationName': 'propertyList'},
+            headers={'Content-Type': 'application/json', 'User-Agent': 'Mozilla/5.0'},
+            timeout=20
+        )
+        
+        if response.status_code != 200:
+            logger.warning(f"{landlord_name}: GraphQL returned {response.status_code}")
+            return apartments
+        
+        data = response.json()
+        if data.get('errors'):
+            logger.warning(f"{landlord_name}: GraphQL errors: {data['errors'][:1]}")
+            return apartments
+        
+        nodes = data.get('data', {}).get('propertyList', {}).get('nodes', [])
+        
+        for node in nodes:
+            # Only apartments/houses, skip GARAGE/parking spots
+            ptype = node.get('propertyType', '').upper()
+            if ptype in ('GARAGE', 'PARKING', 'GEWERBE', 'OFFICE', 'STORAGE'):
+                continue
+            
+            apply_link = node.get('applicationLink')
+            if not apply_link:
+                continue
+            
+            # Extract UUID from apply link
+            uuid_match = re.search(r'/apply/([a-f0-9-]+)', apply_link)
+            if not uuid_match:
+                continue
+            listing_id = uuid_match.group(1)
+            
+            addr = node.get('address', {}) or {}
+            address_str = None
+            if addr.get('street'):
+                parts = [
+                    f"{addr.get('street', '')} {addr.get('houseNumber', '')}".strip(),
+                    f"{addr.get('zipCode', '')} {addr.get('city', '')}".strip()
+                ]
+                if addr.get('district'):
+                    parts.append(addr['district'])
+                address_str = ', '.join([p for p in parts if p])
+            
+            # Only Hamburg
+            if addr.get('city') and 'Hamburg' not in addr['city']:
+                continue
+            
+            apartment = {
+                "id": listing_id,
+                "title": node.get('name', 'Wohnung in Hamburg'),
+                "price": float(node['totalRentGross']) if node.get('totalRentGross') else None,
+                "rooms": float(node['totalRooms']) if node.get('totalRooms') else None,
+                "area": float(node['size']) if node.get('size') else None,
+                "district": addr.get('district'),
+                "address": address_str,
+                "url": apply_link,
+                "image_url": (node.get('titleImage') or {}).get('url'),
+                "landlord": landlord_name,
+                "found_at": datetime.now(timezone.utc),
+                "status": "new"
+            }
+            apartments.append(apartment)
+        
+        logger.info(f"{landlord_name}: GraphQL returned {len(apartments)} apartments")
+    
+    except Exception as e:
+        logger.error(f"{landlord_name} GraphQL error: {str(e)}")
+    
+    return apartments
+
+
+def extract_immomio_token_from_site(landlord_name: str, site_url: str) -> Optional[str]:
+    """Extract immomio token from a landlord website by parsing the iframe src"""
+    try:
+        headers = {'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
+        response = requests.get(site_url, headers=headers, timeout=15)
+        if response.status_code != 200:
+            return None
+        # Find iframe with immomio token
+        match = re.search(r'homepage\.immomio\.com/de/properties\?token=([^"\'&\s]+)', response.text)
+        if match:
+            return match.group(1)
+    except Exception as e:
+        logger.error(f"Error extracting token from {landlord_name}: {e}")
+    return None
+
+
 def scrape_saga_hamburg() -> List[str]:
-    """SAGA Hamburg - largest landlord in Hamburg (~135,000 apartments)"""
+    """SAGA Hamburg - largest landlord (still tries detail pages, captcha may block)"""
     return _scrape_landlord_pages(
         start_url='https://www.saga.hamburg/immobiliensuche?Kategorie=APARTMENT&Stadt=Hamburg',
         detail_link_pattern=r'href="(/immobiliensuche/immobilien-details/[^"]+)"',
@@ -401,25 +532,25 @@ def scrape_saga_hamburg() -> List[str]:
     )
 
 
-def scrape_vonovia_hamburg() -> List[str]:
-    """Vonovia - 2nd largest German landlord"""
+def scrape_walddoerfer() -> List[str]:
+    """Walddörfer - try to scrape with Playwright"""
     return _scrape_landlord_pages(
-        start_url='https://www.vonovia.de/de-de/immobiliensuche?searchPhrase=Hamburg',
-        detail_link_pattern=r'href="(/de-de/immobiliensuche/[^"]+)"',
-        base_url='https://www.vonovia.de',
-        source_name='Vonovia',
-        max_pages=25
+        start_url='https://www.walddoerfer.de/wohnungsangebote/aktuelle-angebote/',
+        detail_link_pattern=r'href="(/wohnungsangebote/[^"]+)"',
+        base_url='https://www.walddoerfer.de',
+        source_name='Walddoerfer',
+        max_pages=15
     )
 
 
-def scrape_deutsche_wohnen() -> List[str]:
-    """Deutsche Wohnen - large German landlord"""
+def scrape_vonovia_hamburg() -> List[str]:
+    """Vonovia Hamburg - Updated URL"""
     return _scrape_landlord_pages(
-        start_url='https://www.deutsche-wohnen.com/immobiliensuche?city=Hamburg',
-        detail_link_pattern=r'href="(/immobiliensuche/[^"]+)"',
-        base_url='https://www.deutsche-wohnen.com',
-        source_name='Deutsche Wohnen',
-        max_pages=20
+        start_url='https://www.vonovia.de/zuhause-finden/immobilien?rentType=miete&latitude=53.6035393&longitude=9.9495941&perimeter=25&immoType=wohnung',
+        detail_link_pattern=r'href="(/zuhause-finden/immobilien/[^"]+)"',
+        base_url='https://www.vonovia.de',
+        source_name='Vonovia',
+        max_pages=25
     )
 
 
@@ -464,47 +595,65 @@ def search_google_for_immomio() -> List[str]:
 
 
 async def scrape_immomio_hamburg():
-    """Main scraping function - combines SAGA + Vonovia + Deutsche Wohnen + DuckDuckGo + Manual"""
+    """Main scraping function - GraphQL for landlords with tokens + Playwright for others + manual URLs"""
     apartments = []
     
     try:
+        # === STEP 1: GraphQL scraping for landlords with known tokens (FAST!) ===
+        for landlord_name, token in IMMOMIO_TOKENS.items():
+            try:
+                landlord_apts = await asyncio.to_thread(scrape_immomio_landlord_token, landlord_name, token)
+                apartments.extend(landlord_apts)
+            except Exception as e:
+                logger.error(f"{landlord_name} GraphQL failed: {e}")
+        
+        # === STEP 2: Refresh tokens from landlord websites (in case they change) ===
+        landlord_sites = {
+            'BGFG': 'https://www.bgfg.de/zuhause-finden/aktuelle-angebote',
+            'Hamburger Wohnen': 'https://www.hamburgerwohnen.de/wohnen/wohnungssuche-home.html',
+            'BDS Hamburg': 'https://www.bds-hamburg.de/unser-angebot/interessentenportal-immomio/',
+            'VHW Hamburg': 'https://www.vhw-hamburg.de/wohnen/aktuelle-angebote.html',
+        }
+        for name, site_url in landlord_sites.items():
+            try:
+                token = await asyncio.to_thread(extract_immomio_token_from_site, name, site_url)
+                if token and token != IMMOMIO_TOKENS.get(name):
+                    logger.info(f"{name}: token refreshed from website")
+                    fresh_apts = await asyncio.to_thread(scrape_immomio_landlord_token, name, token)
+                    apartments.extend(fresh_apts)
+                    IMMOMIO_TOKENS[name] = token
+            except Exception as e:
+                logger.debug(f"Token refresh for {name}: {e}")
+        
+        # === STEP 3: Playwright scraping for SAGA, Vonovia, Walddoerfer (may be blocked by captcha) ===
         all_urls = set()
         
-        # Run landlord scrapers sequentially (Playwright doesn't play well in parallel)
-        try:
-            saga_urls = await asyncio.to_thread(scrape_saga_hamburg)
-            all_urls.update(saga_urls)
-        except Exception as e:
-            logger.error(f"SAGA scraper failed: {e}")
+        for scraper_fn, src_name in [
+            (scrape_saga_hamburg, 'SAGA'),
+            (scrape_vonovia_hamburg, 'Vonovia'),
+            (scrape_walddoerfer, 'Walddoerfer'),
+        ]:
+            try:
+                urls = await asyncio.to_thread(scraper_fn)
+                all_urls.update(urls)
+            except Exception as e:
+                logger.error(f"{src_name} scraper failed: {e}")
         
-        try:
-            vonovia_urls = await asyncio.to_thread(scrape_vonovia_hamburg)
-            all_urls.update(vonovia_urls)
-        except Exception as e:
-            logger.error(f"Vonovia scraper failed: {e}")
-        
-        try:
-            dw_urls = await asyncio.to_thread(scrape_deutsche_wohnen)
-            all_urls.update(dw_urls)
-        except Exception as e:
-            logger.error(f"Deutsche Wohnen scraper failed: {e}")
-        
-        try:
-            search_urls = await asyncio.to_thread(search_google_for_immomio)
-            all_urls.update(search_urls)
-        except Exception as e:
-            logger.error(f"Search scraper failed: {e}")
-        
-        # Manual URLs from database
+        # === STEP 4: Manual URLs from database ===
         manual_urls = await db.manual_urls.find({}, {"_id": 0}).to_list(100)
         for item in manual_urls:
             all_urls.add(item['url'])
         
-        logger.info(f"Total unique URLs to process: {len(all_urls)}")
+        logger.info(f"Playwright/manual URLs to process: {len(all_urls)}")
         
-        # Parse each unique URL sequentially
+        # Parse each unique URL via Playwright (only ones not already from GraphQL)
+        existing_ids = {a['id'] for a in apartments}
         for url in all_urls:
             normalized_url = url.replace('/de/apply/', '/apply/')
+            uuid_match = re.search(r'/apply/([a-f0-9-]+)', normalized_url)
+            if uuid_match and uuid_match.group(1) in existing_ids:
+                continue  # Already have it from GraphQL
+            
             try:
                 apartment = await asyncio.to_thread(parse_immomio_listing, normalized_url)
             except Exception as e:
@@ -518,13 +667,12 @@ async def scrape_immomio_hamburg():
                 (apartment.get('address') and 'Hamburg' in apartment['address']) or
                 ('Hamburg' in apartment.get('title', ''))
             )
-            
             is_manual = any(item['url'].replace('/de/apply/', '/apply/') == normalized_url for item in manual_urls)
             
             if is_hamburg or is_manual:
                 apartments.append(apartment)
         
-        logger.info(f"Successfully parsed {len(apartments)} Hamburg apartments")
+        logger.info(f"TOTAL apartments collected: {len(apartments)}")
     
     except Exception as e:
         logger.error(f"Error in main scraper: {str(e)}")

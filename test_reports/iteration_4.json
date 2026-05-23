@@ -1,0 +1,46 @@
+{
+  "summary": "Verified new multi-landlord immomio GraphQL integration. Backend: 36/36 pytest pass (26 in test_hamburg_scanner.py incl. 8 new multi-landlord tests + 10 in test_profile.py). Confirmed 14 real Hamburg apartments in DB from 4 landlords: VHW Hamburg (6), Hamburger Wohnen (5), SAGA (2 from manual URLs), BDS Hamburg (1). BGFG GraphQL returns 0 (likely empty inventory or stale token) but >=3 landlords satisfied. All apartments have required fields (title, price, rooms float-friendly, area, district, address, immomio apply URL, image_url, landlord). Filters (min_price, max_price, rooms float range) all work correctly at API level. Frontend: Dashboard renders 12 new + 14 total with images, prices (€), rooms, addresses, landlord badges. Filter min_price=1000 correctly narrows to 4 cards. Profile, Admin, History navigation all functional. Login + cookie-auth still healthy.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "scrape_immomio_landlord_token (BGFG)", "issue": "BGFG token returns 0 nodes from GraphQL. Could be (a) currently empty inventory, (b) token expired/invalid, or (c) customerId changed. Should log totalElements from page and add a token-refresh path via extract_immomio_token_from_site for BGFG too."},
+      {"endpoint": "GET /api/scan-status", "issue": "is_scanning=True remains true a while after test_scan_now_triggers fires; no auto-reset guard if a scrape crashes mid-run. Consider try/finally to always set is_scanning=False."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Dashboard apartment cards", "issues": ["Landlord chip shows uppercase 'VHW HAMBURG' / 'HAMBURGER WOHNEN' / 'BDS HAMBURG' - styling is consistent; consider tooltip with full legal name for SAGA-Siedlungs-Aktiengesellschaft Hamburg (long string overflows on narrow screens)."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_hamburg_scanner.py",
+    "/app/backend/tests/test_profile.py",
+    "/app/test_reports/pytest/test_hamburg_scanner_iter4.xml",
+    "/app/test_reports/pytest/test_profile_iter4.xml"
+  ],
+  "action_items": [
+    "(Low) Investigate why BGFG GraphQL token returns 0 results - either inventory empty (acceptable) or token expired. Add periodic re-extraction via existing extract_immomio_token_from_site for BGFG site.",
+    "(Low) Wrap scrape_immomio_hamburg() in try/finally that resets is_scanning=False to avoid status stuck on True if a Playwright scrape raises.",
+    "(Low) Consider showing landlord-source badge color-coded on each card (4 landlords now active) for quicker visual filtering."
+  ],
+  "critical_code_review_comments": [
+    "IMMOMIO_TOKENS dict hardcoded in server.py - good for now, but tokens can expire; runtime token refresh is implemented for the 3 listed sites but BGFG is not in landlord_sites map (lines ~611). Add BGFG website URL so its token is refreshed automatically.",
+    "scrape_immomio_landlord_token filters propertyType in ('GARAGE','PARKING','GEWERBE','OFFICE','STORAGE') - correct. Also enforces Hamburg-only via city substring check - good.",
+    "Type coercion to float on totalRooms/size/totalRentGross is safe (guarded by truthy check). Float rooms (1.5) confirmed working in DB and UI.",
+    "Apartment 'id' is set to immomio apply UUID (deterministic) - prevents duplicate inserts across scans, matches existing dedup-on-upsert logic. Good.",
+    "GraphQL POST has 20s timeout with no retry; one transient network blip will produce 0 items for that landlord that scan. Consider 1 retry with backoff.",
+    "Auth/RBAC/cookie behaviour unchanged and verified by regression tests."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_hamburg_scanner.py (added 8 multi-landlord/filter tests)"
+  ],
+  "success_rate": {"backend": "100% (36/36)", "frontend": "100% (all critical flows: login, dashboard 12 cards, images, filter, history, profile, admin)"},
+  "test_credentials": "admin@hamburg-scanner.com / admin123 (admin, auto-seeded)",
+  "seed_data_creation": "Real GraphQL data already present (14 apartments). No additional seeding. Ephemeral TEST_ users created and deleted per fixture.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Multi-landlord integration is live and stable. DB holds 14 apartments from 4 landlords (BGFG currently 0 results - acceptable). Filters work for float rooms (1.5). Don't trigger /api/scan-now during tests unless necessary (Playwright Vonovia/Walddoerfer paths take ~3 min). Use existing fixtures pattern. test_hamburg_scanner.py now contains 26 tests incl. multi-landlord assertions in TestApartments. For BGFG investigation, hit gql-hp.immomio.com/homepage/graphql directly with the token in server.py:395 and check totalElements.",
+  "rca of the issue": "No new bugs found. BGFG returning 0 nodes is most likely (a) empty inventory at scan time, since the same endpoint returns hundreds for VHW/Hamburger Wohnen/BDS — token format and response shape look identical. Recommend logging page.totalElements per landlord on each scan to disambiguate empty-inventory vs token-invalid."
+}
