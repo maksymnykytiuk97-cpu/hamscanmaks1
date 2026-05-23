@@ -563,6 +563,7 @@ async def scan_apartments():
                 logger.error(f"Failed to send email: {str(e)}")
         
         scanning_state["last_scan"] = datetime.now(timezone.utc)
+        scanning_state["next_scan"] = datetime.now(timezone.utc) + timedelta(minutes=3)
     
     except Exception as e:
         logger.error(f"Error during scan: {str(e)}")
@@ -595,7 +596,8 @@ async def login(credentials: UserLogin, response: Response):
     }
 
 @auth_router.post("/logout")
-async def logout(response: Response, current_user: dict = Depends(get_current_user)):
+async def logout(response: Response):
+    """Idempotent logout - always clears cookies regardless of auth state"""
     response.delete_cookie("access_token", path="/")
     response.delete_cookie("refresh_token", path="/")
     return {"message": "Logged out"}

@@ -175,7 +175,7 @@ export default function AdminPanel() {
                 <div className="relative mt-1">
                   <Lock weight="bold" size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-[#525252]" />
                   <Input
-                    type="text"
+                    type="password"
                     required
                     minLength={6}
                     value={newUser.password}
