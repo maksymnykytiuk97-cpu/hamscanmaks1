@@ -319,26 +319,55 @@ def parse_immomio_listing(url: str) -> Optional[dict]:
 
 def _scrape_landlord_pages(start_url: str, detail_link_pattern: str, base_url: str, source_name: str, max_pages: int = 30) -> List[str]:
     """Generic Playwright scraper - finds immomio URLs by visiting detail pages of a landlord site"""
+    import time
     immomio_urls = set()
     
     try:
         from playwright.sync_api import sync_playwright
         
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
+            browser = p.chromium.launch(
+                headless=True,
+                args=[
+                    '--disable-blink-features=AutomationControlled',
+                    '--no-sandbox',
+                    '--disable-dev-shm-usage',
+                    '--disable-features=IsolateOrigins,site-per-process',
+                ]
+            )
             context = browser.new_context(
                 user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                locale='de-DE'
+                locale='de-DE',
+                viewport={'width': 1920, 'height': 1080},
+                extra_http_headers={
+                    'Accept-Language': 'de-DE,de;q=0.9,en;q=0.8',
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                }
             )
+            # Anti-detection: hide webdriver flag
+            context.add_init_script("""
+                Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+                Object.defineProperty(navigator, 'languages', { get: () => ['de-DE', 'de', 'en'] });
+                Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+                window.chrome = { runtime: {}, app: {} };
+            """)
             page = context.new_page()
             
             try:
-                page.goto(start_url, timeout=30000, wait_until='domcontentloaded')
-                page.wait_for_timeout(8000)
+                page.goto(start_url, timeout=60000, wait_until='networkidle')
                 
+                # Wait for any captcha to resolve (Friendly Captcha solves automatically in ~2-10 seconds)
+                for _ in range(15):
+                    time.sleep(2)
+                    title = page.title()
+                    if 'Bot check' not in title and 'Sicherheitspr' not in title:
+                        break
+                
+                # Extra wait for content to load via AJAX
+                page.wait_for_timeout(5000)
                 html = page.content()
                 
-                # Find immomio links directly on listing page
+                # Find immomio links directly
                 direct_links = re.findall(
                     r'https?://tenant\.immomio\.com/(?:de/)?apply/[a-f0-9-]+',
                     html
@@ -346,10 +375,7 @@ def _scrape_landlord_pages(start_url: str, detail_link_pattern: str, base_url: s
                 immomio_urls.update(direct_links)
                 
                 # Find detail page links
-                detail_paths = re.findall(detail_link_pattern, html)
-                # Dedupe
-                detail_paths = list(dict.fromkeys(detail_paths))
-                
+                detail_paths = list(dict.fromkeys(re.findall(detail_link_pattern, html)))
                 logger.info(f"{source_name}: found {len(detail_paths)} detail pages, visiting first {max_pages}")
                 
                 # Visit each detail page
@@ -357,17 +383,12 @@ def _scrape_landlord_pages(start_url: str, detail_link_pattern: str, base_url: s
                     try:
                         detail_url = detail_path if detail_path.startswith('http') else f'{base_url}{detail_path}'
                         page.goto(detail_url, timeout=20000, wait_until='domcontentloaded')
-                        page.wait_for_timeout(2500)
+                        page.wait_for_timeout(3000)
                         detail_html = page.content()
                         
-                        # Find immomio links on detail page
-                        found = re.findall(
-                            r'https?://tenant\.immomio\.com/(?:de/)?apply/[a-f0-9-]+',
-                            detail_html
-                        )
+                        found = re.findall(r'https?://tenant\.immomio\.com/(?:de/)?apply/[a-f0-9-]+', detail_html)
                         immomio_urls.update(found)
                         
-                        # Also check for embedded iframes / data attributes
                         iframe_srcs = re.findall(r'<iframe[^>]*src="([^"]*immomio[^"]*)"', detail_html)
                         for iframe in iframe_srcs:
                             uuid_match = re.search(r'apply/([a-f0-9-]+)', iframe)
@@ -376,14 +397,12 @@ def _scrape_landlord_pages(start_url: str, detail_link_pattern: str, base_url: s
                     except Exception as e:
                         logger.debug(f"{source_name}: error on detail page: {e}")
                         continue
-            
             except Exception as e:
                 logger.error(f"{source_name}: error in main scrape: {str(e)}")
             finally:
                 browser.close()
         
         logger.info(f"{source_name} scraper found {len(immomio_urls)} immomio URLs")
-    
     except Exception as e:
         logger.error(f"{source_name} scraper failed: {str(e)}")
     
@@ -975,21 +994,32 @@ async def get_apartments(
         if max_rooms is not None:
             query["rooms"]["$lte"] = max_rooms
     
-    if status:
-        query["status"] = status
+    # "new" = added in last 24 hours, "history" = older than 24 hours, no filter = all
+    if status == "new":
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+        query["found_at"] = {"$gte": cutoff}
+    elif status == "history":
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+        query["found_at"] = {"$lt": cutoff}
     
     apartments = await db.apartments.find(query, {"_id": 0}).sort("found_at", -1).to_list(1000)
     return apartments
 
 @api_router.get("/apartments/history")
 async def get_apartment_history(current_user: dict = Depends(get_current_user)):
-    apartments = await db.apartments.find({}, {"_id": 0}).sort("found_at", -1).to_list(1000)
+    """Return all apartments older than 24 hours"""
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+    apartments = await db.apartments.find(
+        {"found_at": {"$lt": cutoff}}, {"_id": 0}
+    ).sort("found_at", -1).to_list(1000)
     return apartments
 
 @api_router.get("/scan-status")
 async def get_scan_status(current_user: dict = Depends(get_current_user)):
     total = await db.apartments.count_documents({})
-    new = await db.apartments.count_documents({"status": "new"})
+    # "new" = within last 24h
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+    new = await db.apartments.count_documents({"found_at": {"$gte": cutoff}})
     
     return {
         "is_scanning": scanning_state["is_scanning"],

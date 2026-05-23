@@ -76,7 +76,7 @@ export default function StatusBar({ scanStatus, onScanNow, user, onLogout, onAdm
 
             <div className="flex items-center gap-2 px-4 py-2 bg-[#FF3B30] text-white rounded-none">
               <span className="text-xs font-mono uppercase tracking-[0.2em]" data-testid="new-apartments-count">
-                NEU: {scanStatus?.new_apartments || 0}
+                NEU (24H): {scanStatus?.new_apartments || 0}
               </span>
             </div>
 

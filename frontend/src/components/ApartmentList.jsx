@@ -1,6 +1,6 @@
-import { MapPin, CurrencyDollar, Resize, Bed, ArrowSquareOut, Eye } from '@phosphor-icons/react';
+import { MapPin, CurrencyDollar, Resize, Bed, ArrowSquareOut } from '@phosphor-icons/react';
 
-export default function ApartmentList({ apartments, loading, view, onMarkSeen }) {
+export default function ApartmentList({ apartments, loading, view }) {
   if (loading) {
     return (
       <div className="flex items-center justify-center h-96">
@@ -21,8 +21,8 @@ export default function ApartmentList({ apartments, loading, view, onMarkSeen })
           </p>
           <p className="text-sm text-[#525252]">
             {view === 'new' 
-              ? 'Aktuell gibt es keine neuen Wohnungen. Der Scanner läuft automatisch.'
-              : 'Noch keine Wohnungen in der Historie.'}
+              ? 'Keine neuen Wohnungen in den letzten 24 Stunden. Der Scanner läuft automatisch.'
+              : 'Noch keine Wohnungen im Archiv (älter als 24 Stunden).'}
           </p>
         </div>
       </div>
@@ -33,7 +33,7 @@ export default function ApartmentList({ apartments, loading, view, onMarkSeen })
     <div className="p-6">
       <div className="mb-6">
         <h2 className="text-2xl tracking-tight font-bold" style={{ fontFamily: 'Cabinet Grotesk' }}>
-          {view === 'new' ? 'NEUE WOHNUNGEN' : 'ALLE WOHNUNGEN'}
+          {view === 'new' ? 'NEUE WOHNUNGEN (24 STD)' : 'ARCHIV'}
         </h2>
         <p className="text-sm text-[#525252] font-mono mt-1" data-testid="apartment-count">
           {apartments.length} {apartments.length === 1 ? 'Wohnung' : 'Wohnungen'}
@@ -71,14 +71,18 @@ export default function ApartmentList({ apartments, loading, view, onMarkSeen })
                   >
                     {apt.title}
                   </h3>
-                  {apt.status === 'new' && (
-                    <span 
-                      className="px-2 py-1 bg-[#FF3B30] text-white text-xs font-mono uppercase rounded-none"
-                      data-testid={`apartment-status-${index}`}
-                    >
-                      NEU
-                    </span>
-                  )}
+                  {(() => {
+                    const ageMs = Date.now() - new Date(apt.found_at).getTime();
+                    const isNew = ageMs < 24 * 60 * 60 * 1000;
+                    return isNew ? (
+                      <span 
+                        className="px-2 py-1 bg-[#FF3B30] text-white text-xs font-mono uppercase rounded-none whitespace-nowrap"
+                        data-testid={`apartment-status-${index}`}
+                      >
+                        NEU
+                      </span>
+                    ) : null;
+                  })()}
                 </div>
 
                 {/* Details */}
@@ -163,17 +167,6 @@ export default function ApartmentList({ apartments, loading, view, onMarkSeen })
                     <ArrowSquareOut weight="bold" size={16} />
                     <span className="text-xs font-mono uppercase tracking-[0.2em]">ZUR ANZEIGE</span>
                   </a>
-                  
-                  {apt.status === 'new' && (
-                    <button
-                      onClick={() => onMarkSeen(apt.id)}
-                      className="px-4 py-2 bg-white border border-[#050505] text-[#050505] rounded-none hover:bg-[#F4F4F4] transition-colors duration-150 flex items-center gap-2"
-                      data-testid={`apartment-mark-seen-${index}`}
-                    >
-                      <Eye weight="bold" size={16} />
-                      <span className="text-xs font-mono uppercase tracking-[0.2em]">ALS GESEHEN MARKIEREN</span>
-                    </button>
-                  )}
                 </div>
               </div>
             </div>

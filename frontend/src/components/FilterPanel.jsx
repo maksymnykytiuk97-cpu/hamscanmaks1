@@ -44,7 +44,7 @@ export default function FilterPanel({ filters, setFilters, view, setView }) {
           >
             <div className="flex items-center gap-2">
               <ClockCounterClockwise weight="bold" size={18} />
-              <span className="text-sm font-mono uppercase tracking-[0.2em]">HISTORIE</span>
+              <span className="text-sm font-mono uppercase tracking-[0.2em]">ARCHIV</span>
             </div>
           </button>
         </div>

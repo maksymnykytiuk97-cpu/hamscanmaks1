@@ -82,16 +82,6 @@ export default function Dashboard() {
     }
   };
 
-  const handleMarkSeen = async (apartmentId) => {
-    try {
-      await api.post(`/api/apartments/${apartmentId}/mark-seen`);
-      fetchApartments();
-      fetchScanStatus();
-    } catch (error) {
-      toast.error('Fehler beim Markieren');
-    }
-  };
-  
   const handleLogout = async () => {
     await logout();
     navigate('/login');
@@ -126,7 +116,6 @@ export default function Dashboard() {
               apartments={apartments}
               loading={loading}
               view={view}
-              onMarkSeen={handleMarkSeen}
             />
           </div>
         </div>
