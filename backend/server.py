@@ -799,6 +799,117 @@ def scrape_walddoerfer() -> List[str]:
     return []
 
 
+def scrape_gcv() -> List[dict]:
+    """GCV Verwaltungsgesellschaft - direct scraping of /angebote.php"""
+    import time, hashlib
+    apartments = []
+    
+    try:
+        from playwright.sync_api import sync_playwright
+        
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True, args=['--no-sandbox', '--disable-dev-shm-usage'])
+            context = browser.new_context(
+                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
+                locale='de-DE'
+            )
+            page = context.new_page()
+            
+            try:
+                page.goto('https://www.gcv-gmbh.de/angebote.php', timeout=30000, wait_until='networkidle')
+                time.sleep(3)
+                html = page.content()
+                text = page.evaluate('document.body.innerText')
+                
+                # First check for immomio iframe/links
+                immomio_links = list(set(re.findall(r'https?://tenant\.immomio\.com/(?:de/)?apply/[a-f0-9-]+', html)))
+                iframe_match = re.search(r'homepage\.immomio\.com/de/properties\?token=([^"&\'\s]+)', html)
+                
+                if iframe_match:
+                    # Use GraphQL with this token
+                    token = iframe_match.group(1)
+                    gcv_apts = scrape_immomio_landlord_token('GCV Hamburg', token)
+                    apartments.extend(gcv_apts)
+                    logger.info(f"GCV: found immomio token, got {len(gcv_apts)} apartments")
+                elif immomio_links:
+                    # Parse each immomio link
+                    for link in immomio_links:
+                        apt = parse_immomio_listing(link)
+                        if apt:
+                            apt['landlord'] = 'GCV Hamburg'
+                            apartments.append(apt)
+                else:
+                    # No immomio - check if page has actual apartment listings
+                    # Look for typical apartment indicators
+                    has_apartments = any(kw in text for kw in ['Zimmer', '€', 'm²', 'qm', 'Wohnfläche', 'Kaltmiete'])
+                    
+                    if has_apartments:
+                        # Try to extract apartment data from page directly
+                        # Split by common section delimiters
+                        sections = re.split(r'\n{2,}', text)
+                        for section in sections:
+                            if 'Zimmer' in section and ('€' in section or 'm²' in section):
+                                # Extract data
+                                title_match = re.search(r'^([^\n]{10,150})', section.strip())
+                                title = title_match.group(1).strip() if title_match else 'GCV Wohnung Hamburg'
+                                
+                                price_match = re.search(r'([\d.]+,\d{2})\s*€', section)
+                                price = None
+                                if price_match:
+                                    try:
+                                        price = float(price_match.group(1).replace('.', '').replace(',', '.'))
+                                    except ValueError:
+                                        pass
+                                
+                                area_match = re.search(r'([\d]+(?:,\d+)?)\s*m²', section)
+                                area = None
+                                if area_match:
+                                    try:
+                                        area = float(area_match.group(1).replace(',', '.'))
+                                    except ValueError:
+                                        pass
+                                
+                                rooms_match = re.search(r'(\d+(?:[,.]\d+)?)\s*[-\s]?Zimmer', section)
+                                rooms = None
+                                if rooms_match:
+                                    try:
+                                        rooms = float(rooms_match.group(1).replace(',', '.'))
+                                    except ValueError:
+                                        pass
+                                
+                                addr_match = re.search(r'([\w\.\-äöüÄÖÜß\s]+\d+[a-zA-Z]?,?\s*\d{5}\s+Hamburg)', section)
+                                address = addr_match.group(1).strip() if addr_match else None
+                                
+                                # Create stable ID from content
+                                content_hash = hashlib.md5(section[:300].encode()).hexdigest()[:16]
+                                listing_id = f"gcv-{content_hash}"
+                                
+                                apartments.append({
+                                    "id": listing_id,
+                                    "title": title[:200],
+                                    "price": price,
+                                    "rooms": rooms,
+                                    "area": area,
+                                    "district": None,
+                                    "address": address,
+                                    "url": "https://www.gcv-gmbh.de/angebote.php",
+                                    "image_url": None,
+                                    "landlord": "GCV Hamburg",
+                                    "found_at": datetime.now(timezone.utc),
+                                    "status": "new"
+                                })
+            except Exception as e:
+                logger.error(f"GCV scrape error: {e}")
+            finally:
+                browser.close()
+        
+        logger.info(f"GCV: parsed {len(apartments)} apartments")
+    except Exception as e:
+        logger.error(f"GCV failed: {e}")
+    
+    return apartments
+
+
 def search_google_for_immomio() -> List[str]:
     """Search Google for immomio Hamburg listings using DuckDuckGo as fallback"""
     immomio_urls = set()
@@ -890,6 +1001,12 @@ async def scrape_immomio_hamburg():
             apartments.extend(wald_apts)
         except Exception as e:
             logger.error(f"Walddörfer direct failed: {e}")
+        
+        try:
+            gcv_apts = await asyncio.to_thread(scrape_gcv)
+            apartments.extend(gcv_apts)
+        except Exception as e:
+            logger.error(f"GCV failed: {e}")
         
         # === STEP 4: Manual URLs from database ===
         manual_urls = await db.manual_urls.find({}, {"_id": 0}).to_list(100)
