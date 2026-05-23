@@ -317,8 +317,8 @@ def parse_immomio_listing(url: str) -> Optional[dict]:
         return None
 
 
-def scrape_saga_hamburg() -> List[str]:
-    """Scrape SAGA Hamburg website for immomio apply URLs using Playwright"""
+def _scrape_landlord_pages(start_url: str, detail_link_pattern: str, base_url: str, source_name: str, max_pages: int = 30) -> List[str]:
+    """Generic Playwright scraper - finds immomio URLs by visiting detail pages of a landlord site"""
     immomio_urls = set()
     
     try:
@@ -333,53 +333,94 @@ def scrape_saga_hamburg() -> List[str]:
             page = context.new_page()
             
             try:
-                # SAGA listing page
-                page.goto('https://www.saga.hamburg/immobiliensuche?Kategorie=APARTMENT', timeout=30000, wait_until='domcontentloaded')
-                page.wait_for_timeout(8000)  # Wait for JS challenge + content load
+                page.goto(start_url, timeout=30000, wait_until='domcontentloaded')
+                page.wait_for_timeout(8000)
                 
-                # Get all links from the page
                 html = page.content()
                 
-                # Find immomio links directly
-                immomio_links = re.findall(
+                # Find immomio links directly on listing page
+                direct_links = re.findall(
                     r'https?://tenant\.immomio\.com/(?:de/)?apply/[a-f0-9-]+',
                     html
                 )
-                immomio_urls.update(immomio_links)
+                immomio_urls.update(direct_links)
                 
-                # Find all property detail pages on SAGA
-                property_links = re.findall(
-                    r'href="(/immobiliensuche/immobilien-details/[^"]+)"',
-                    html
-                )
+                # Find detail page links
+                detail_paths = re.findall(detail_link_pattern, html)
+                # Dedupe
+                detail_paths = list(dict.fromkeys(detail_paths))
                 
-                # Visit each property page to find immomio link (limit to first 20 for performance)
-                for prop_path in property_links[:20]:
+                logger.info(f"{source_name}: found {len(detail_paths)} detail pages, visiting first {max_pages}")
+                
+                # Visit each detail page
+                for detail_path in detail_paths[:max_pages]:
                     try:
-                        prop_url = f'https://www.saga.hamburg{prop_path}'
-                        page.goto(prop_url, timeout=20000, wait_until='domcontentloaded')
-                        page.wait_for_timeout(3000)
-                        prop_html = page.content()
-                        prop_immomio = re.findall(
+                        detail_url = detail_path if detail_path.startswith('http') else f'{base_url}{detail_path}'
+                        page.goto(detail_url, timeout=20000, wait_until='domcontentloaded')
+                        page.wait_for_timeout(2500)
+                        detail_html = page.content()
+                        
+                        # Find immomio links on detail page
+                        found = re.findall(
                             r'https?://tenant\.immomio\.com/(?:de/)?apply/[a-f0-9-]+',
-                            prop_html
+                            detail_html
                         )
-                        immomio_urls.update(prop_immomio)
+                        immomio_urls.update(found)
+                        
+                        # Also check for embedded iframes / data attributes
+                        iframe_srcs = re.findall(r'<iframe[^>]*src="([^"]*immomio[^"]*)"', detail_html)
+                        for iframe in iframe_srcs:
+                            uuid_match = re.search(r'apply/([a-f0-9-]+)', iframe)
+                            if uuid_match:
+                                immomio_urls.add(f"https://tenant.immomio.com/apply/{uuid_match.group(1)}")
                     except Exception as e:
-                        logger.debug(f"Error fetching SAGA property page: {e}")
+                        logger.debug(f"{source_name}: error on detail page: {e}")
                         continue
-                
+            
             except Exception as e:
-                logger.error(f"Error in SAGA Playwright scrape: {str(e)}")
+                logger.error(f"{source_name}: error in main scrape: {str(e)}")
             finally:
                 browser.close()
         
-        logger.info(f"SAGA scraper found {len(immomio_urls)} immomio URLs")
+        logger.info(f"{source_name} scraper found {len(immomio_urls)} immomio URLs")
     
     except Exception as e:
-        logger.error(f"Error in SAGA scraper: {str(e)}")
+        logger.error(f"{source_name} scraper failed: {str(e)}")
     
     return list(immomio_urls)
+
+
+def scrape_saga_hamburg() -> List[str]:
+    """SAGA Hamburg - largest landlord in Hamburg (~135,000 apartments)"""
+    return _scrape_landlord_pages(
+        start_url='https://www.saga.hamburg/immobiliensuche?Kategorie=APARTMENT&Stadt=Hamburg',
+        detail_link_pattern=r'href="(/immobiliensuche/immobilien-details/[^"]+)"',
+        base_url='https://www.saga.hamburg',
+        source_name='SAGA',
+        max_pages=30
+    )
+
+
+def scrape_vonovia_hamburg() -> List[str]:
+    """Vonovia - 2nd largest German landlord"""
+    return _scrape_landlord_pages(
+        start_url='https://www.vonovia.de/de-de/immobiliensuche?searchPhrase=Hamburg',
+        detail_link_pattern=r'href="(/de-de/immobiliensuche/[^"]+)"',
+        base_url='https://www.vonovia.de',
+        source_name='Vonovia',
+        max_pages=25
+    )
+
+
+def scrape_deutsche_wohnen() -> List[str]:
+    """Deutsche Wohnen - large German landlord"""
+    return _scrape_landlord_pages(
+        start_url='https://www.deutsche-wohnen.com/immobiliensuche?city=Hamburg',
+        detail_link_pattern=r'href="(/immobiliensuche/[^"]+)"',
+        base_url='https://www.deutsche-wohnen.com',
+        source_name='Deutsche Wohnen',
+        max_pages=20
+    )
 
 
 def search_google_for_immomio() -> List[str]:
@@ -423,45 +464,61 @@ def search_google_for_immomio() -> List[str]:
 
 
 async def scrape_immomio_hamburg():
-    """Main scraping function - combines SAGA + Google search"""
+    """Main scraping function - combines SAGA + Vonovia + Deutsche Wohnen + DuckDuckGo + Manual"""
     apartments = []
     
     try:
-        # Collect URLs from multiple sources
         all_urls = set()
         
-        # Source 1: SAGA Hamburg
-        saga_urls = await asyncio.to_thread(scrape_saga_hamburg)
-        all_urls.update(saga_urls)
+        # Run landlord scrapers sequentially (Playwright doesn't play well in parallel)
+        try:
+            saga_urls = await asyncio.to_thread(scrape_saga_hamburg)
+            all_urls.update(saga_urls)
+        except Exception as e:
+            logger.error(f"SAGA scraper failed: {e}")
         
-        # Source 2: Google/DuckDuckGo search
-        search_urls = await asyncio.to_thread(search_google_for_immomio)
-        all_urls.update(search_urls)
+        try:
+            vonovia_urls = await asyncio.to_thread(scrape_vonovia_hamburg)
+            all_urls.update(vonovia_urls)
+        except Exception as e:
+            logger.error(f"Vonovia scraper failed: {e}")
         
-        # Source 3: Manually added URLs from database
+        try:
+            dw_urls = await asyncio.to_thread(scrape_deutsche_wohnen)
+            all_urls.update(dw_urls)
+        except Exception as e:
+            logger.error(f"Deutsche Wohnen scraper failed: {e}")
+        
+        try:
+            search_urls = await asyncio.to_thread(search_google_for_immomio)
+            all_urls.update(search_urls)
+        except Exception as e:
+            logger.error(f"Search scraper failed: {e}")
+        
+        # Manual URLs from database
         manual_urls = await db.manual_urls.find({}, {"_id": 0}).to_list(100)
         for item in manual_urls:
             all_urls.add(item['url'])
         
-        logger.info(f"Total URLs to process: {len(all_urls)}")
+        logger.info(f"Total unique URLs to process: {len(all_urls)}")
         
-        # Parse each unique URL
+        # Parse each unique URL sequentially
         for url in all_urls:
-            # Normalize URL (remove /de/ prefix variant)
             normalized_url = url.replace('/de/apply/', '/apply/')
-            
-            apartment = await asyncio.to_thread(parse_immomio_listing, normalized_url)
+            try:
+                apartment = await asyncio.to_thread(parse_immomio_listing, normalized_url)
+            except Exception as e:
+                logger.error(f"Parse error for {normalized_url}: {e}")
+                continue
             
             if not apartment:
                 continue
             
-            # Check Hamburg in address, title, or page (already parsed)
             is_hamburg = (
                 (apartment.get('address') and 'Hamburg' in apartment['address']) or
                 ('Hamburg' in apartment.get('title', ''))
             )
             
-            # If URL is manually added by admin, always include it
             is_manual = any(item['url'].replace('/de/apply/', '/apply/') == normalized_url for item in manual_urls)
             
             if is_hamburg or is_manual:
@@ -528,39 +585,56 @@ async def scan_apartments():
         }
         await db.scan_logs.insert_one(scan_log)
         
-        # Send email
+        # Send email to all users with notifications enabled
         if new_apartments and resend.api_key:
-            try:
-                # Get recipients (admin email + all user emails)
-                settings = await db.settings.find_one({}, {"_id": 0})
-                recipient = settings.get('email', RECIPIENT_EMAIL) if settings else RECIPIENT_EMAIL
-                
-                html_content = f"<h2>🏠 {len(new_apartments)} neue Wohnungen in Hamburg gefunden!</h2>"
-                html_content += "<ul>"
-                for apt in new_apartments:
-                    html_content += f"<li><strong>{apt['title']}</strong><br>"
-                    if apt.get('price'):
-                        html_content += f"Preis: €{apt['price']:.2f}<br>"
-                    if apt.get('rooms'):
-                        html_content += f"Zimmer: {apt['rooms']}<br>"
-                    if apt.get('area'):
-                        html_content += f"Fläche: {apt['area']}m²<br>"
-                    if apt.get('address'):
-                        html_content += f"Adresse: {apt['address']}<br>"
-                    html_content += f"<a href='{apt['url']}'>Zur Anzeige</a></li><br>"
-                html_content += "</ul>"
-                
-                params = {
-                    "from": SENDER_EMAIL,
-                    "to": [recipient],
-                    "subject": f"🏠 {len(new_apartments)} neue Wohnungen in Hamburg",
-                    "html": html_content
-                }
-                
-                await asyncio.to_thread(resend.Emails.send, params)
-                logger.info(f"Email sent to {recipient}")
-            except Exception as e:
-                logger.error(f"Failed to send email: {str(e)}")
+            # Get all users with notifications enabled and email set
+            users_to_notify = await db.users.find({
+                "notifications_enabled": True,
+                "notification_email": {"$ne": None, "$ne": ""}
+            }, {"notification_email": 1, "_id": 0}).to_list(1000)
+            
+            recipients = [u['notification_email'] for u in users_to_notify if u.get('notification_email')]
+            
+            # Also include legacy global settings email if set
+            settings = await db.settings.find_one({}, {"_id": 0})
+            if settings and settings.get('email'):
+                if settings['email'] not in recipients:
+                    recipients.append(settings['email'])
+            
+            if recipients:
+                try:
+                    html_content = f"<h2>🏠 {len(new_apartments)} neue Wohnungen in Hamburg gefunden!</h2>"
+                    html_content += "<ul>"
+                    for apt in new_apartments:
+                        html_content += f"<li><strong>{apt['title']}</strong><br>"
+                        if apt.get('price'):
+                            html_content += f"Preis: €{apt['price']:.2f}<br>"
+                        if apt.get('rooms'):
+                            html_content += f"Zimmer: {apt['rooms']}<br>"
+                        if apt.get('area'):
+                            html_content += f"Fläche: {apt['area']}m²<br>"
+                        if apt.get('address'):
+                            html_content += f"Adresse: {apt['address']}<br>"
+                        if apt.get('landlord'):
+                            html_content += f"Vermieter: {apt['landlord']}<br>"
+                        html_content += f"<a href='{apt['url']}'>Zur Anzeige</a></li><br>"
+                    html_content += "</ul>"
+                    
+                    # Send to each recipient
+                    for email_addr in recipients:
+                        try:
+                            params = {
+                                "from": SENDER_EMAIL,
+                                "to": [email_addr],
+                                "subject": f"🏠 {len(new_apartments)} neue Wohnungen in Hamburg",
+                                "html": html_content
+                            }
+                            await asyncio.to_thread(resend.Emails.send, params)
+                            logger.info(f"Email sent to {email_addr}")
+                        except Exception as e:
+                            logger.error(f"Failed to send email to {email_addr}: {str(e)}")
+                except Exception as e:
+                    logger.error(f"Failed to prepare emails: {str(e)}")
         
         scanning_state["last_scan"] = datetime.now(timezone.utc)
         scanning_state["next_scan"] = datetime.now(timezone.utc) + timedelta(minutes=3)
@@ -608,8 +682,41 @@ async def get_me(current_user: dict = Depends(get_current_user)):
         "id": current_user["_id"],
         "email": current_user["email"],
         "name": current_user.get("name"),
-        "role": current_user.get("role", "user")
+        "role": current_user.get("role", "user"),
+        "notification_email": current_user.get("notification_email"),
+        "notifications_enabled": current_user.get("notifications_enabled", False)
     }
+
+# ============= PROFILE ENDPOINTS =============
+
+class ProfileUpdate(BaseModel):
+    notification_email: Optional[EmailStr] = None
+    notifications_enabled: bool = False
+
+@api_router.get("/profile")
+async def get_profile(current_user: dict = Depends(get_current_user)):
+    return {
+        "id": current_user["_id"],
+        "email": current_user["email"],
+        "name": current_user.get("name"),
+        "notification_email": current_user.get("notification_email") or current_user["email"],
+        "notifications_enabled": current_user.get("notifications_enabled", False)
+    }
+
+@api_router.put("/profile")
+async def update_profile(profile: ProfileUpdate, current_user: dict = Depends(get_current_user)):
+    update_data = {
+        "notifications_enabled": profile.notifications_enabled
+    }
+    if profile.notification_email:
+        update_data["notification_email"] = profile.notification_email
+    
+    await db.users.update_one(
+        {"_id": ObjectId(current_user["_id"])},
+        {"$set": update_data}
+    )
+    
+    return {"message": "Profile updated", **update_data}
 
 # ============= ADMIN ENDPOINTS =============
 

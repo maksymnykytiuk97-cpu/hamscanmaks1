@@ -107,6 +107,7 @@ export default function Dashboard() {
         user={user}
         onLogout={handleLogout}
         onAdminClick={() => navigate('/admin')}
+        onProfileClick={() => navigate('/profile')}
       />
       
       <div className="border-t border-[#050505]">

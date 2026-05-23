@@ -1,0 +1,50 @@
+{
+  "summary": "Tested new Profile/notifications feature + multi-landlord scrapers. Backend: 28/28 pytest pass (18 regression in test_hamburg_scanner.py + 10 new in test_profile.py incl. GET/PUT /api/profile, persistence, validation, /api/auth/me fields). Frontend: ProfilePage navigation from PROFIL button in StatusBar works, account email/role displayed, notification_email editable, checkbox toggles, save persists across reload, green-dot indicator on PROFIL button appears when notifications enabled. Dashboard still shows the 2 manual-URL apartments (€571.89 Bramfeld, €1296.59 Moorburg). Backend logs confirm SAGA + Vonovia + Deutsche Wohnen run sequentially with no Playwright concurrency errors (each returns 0 URLs - expected due to captchas).",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "/api/profile (GET)", "issue": "Falls back notification_email to login email when unset - good UX, but a saved empty string would NOT fall back (only None). Edge case only."},
+      {"endpoint": "/api/profile (PUT)", "issue": "If notification_email field is omitted or null, the existing value is preserved (only notifications_enabled is updated). Behavior is correct but undocumented; consider explicit clearing semantics."},
+      {"endpoint": "scrape_immomio_hamburg", "issue": "One transient 'Target page, context or browser has been closed' error on the very first startup-time SAGA scrape (race during init). All subsequent scheduled runs are clean. Consider a small retry or guard."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [
+      {"flow": "Profile -> Dashboard green dot sync", "issue": "Possible timing issue when navigating from /profile back to / right after save: green-dot indicator may persist for a moment because back-button click can race with checkAuth() refresh. Reproduced once in Playwright (disable+save+back showed dot still ON). Suggest awaiting checkAuth() to complete before navigation, or refetch /api/auth/me in Dashboard on mount.", "affected_selectors": ["[data-testid=\"profile-button\"]"]}
+    ],
+    "design_issues": [
+      {"screen": "ProfilePage", "issues": ["Phosphor icons import uses 'EnvelopeSimple' - works, but ensure tree-shaking by importing from '@phosphor-icons/react/dist/ssr' if SSR'd later. Currently fine."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_hamburg_scanner.py",
+    "/app/backend/tests/test_profile.py",
+    "/app/test_reports/pytest/test_profile_results.xml"
+  ],
+  "action_items": [
+    "(Low) In ProfilePage handleSave, ensure `await checkAuth()` completes BEFORE allowing back-navigation, or have Dashboard call checkAuth on mount, so green-dot indicator on PROFIL button reflects latest state immediately.",
+    "(Low) Guard scrape_immomio_hamburg against startup race causing 'Target page closed' on the very first SAGA invocation (one-shot only).",
+    "(Carry-over from iter_2) Migrate @app.on_event to FastAPI lifespan, type=password for new-user input in AdminPanel, sync next_scan with backend after each scheduled scan."
+  ],
+  "critical_code_review_comments": [
+    "ProfileUpdate model: `notifications_enabled: bool = False` - if client sends only {\"notification_email\":...}, notifications_enabled will silently reset to False. Should be Optional[bool] = None with merge logic, or PATCH semantics.",
+    "PUT /api/profile returns 200 with `{**update_data}` but missing id/email - consider returning the full updated profile for client convenience.",
+    "Generic _scrape_landlord_pages: regex-only detection will miss Immomio links rendered post-hydration by JS. For Friendly-Captcha sites this is expected to return 0 - which it does.",
+    "scrape_immomio_hamburg correctly switched to sequential `await asyncio.to_thread(...)` calls inside one event loop - no concurrent sync_playwright contexts. Good.",
+    "Email loop: iterates users with notifications_enabled=true AND non-empty notification_email; also merges legacy global settings email. Correct.",
+    "Auth playbook compliance unchanged: bcrypt $2b$, httpOnly+secure+samesite=none cookies, explicit CORS origin + credentials, idempotent seed_admin. OK.",
+    "No brute-force lockout on /api/auth/login (carry-over from iter_2)."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_profile.py (new)",
+    "/app/test_reports/pytest/test_profile_results.xml (new)"
+  ],
+  "success_rate": {"backend": "100% (28/28: 18 regression + 10 new profile)", "frontend": "~95% (12/12 functional steps, 1 minor sync glitch on green-dot after disable)"},
+  "test_credentials": "admin@hamburg-scanner.com / admin123 (admin, auto-seeded)",
+  "seed_data_creation": "Ephemeral TEST_profile_* user created and deleted per fixture. Admin profile temporarily had notification_email='notify_e2e@example.com' / notifications_enabled=true during UI test; reset to maximnikityk@ukr.net / false at end.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "New pytest module /app/backend/tests/test_profile.py covers GET/PUT /api/profile, persistence, validation (422 on bad email), /api/auth/me notification fields, plus regression spot-checks. Use admin_session/user_session fixtures pattern matching test_hamburg_scanner.py. SAGA/Vonovia/Deutsche Wohnen scrapers all return 0 URLs in this environment - that is EXPECTED (Friendly Captcha). Apartments come from manual URLs only (2 items). When testing UI green-dot toggle, ensure checkAuth() is fully awaited before navigating away from /profile.",
+  "rca of the issue": "Green-dot sync: ProfilePage calls `await api.put('/api/profile', profile); await checkAuth(); toast.success(...)`. checkAuth() refetches /api/auth/me and setUser. React state update is async; if the user clicks Back immediately after the toast, AuthContext may still be in the process of re-rendering, so StatusBar reads stale `user.notifications_enabled=true`. Mitigation: either disable the Back button until checkAuth resolves, or have Dashboard call checkAuth() in a useEffect on mount."
+}

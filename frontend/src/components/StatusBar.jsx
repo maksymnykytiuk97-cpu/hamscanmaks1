@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
-import { Broadcast, Clock, Buildings, Gear, SignOut } from '@phosphor-icons/react';
+import { Broadcast, Clock, Buildings, Gear, SignOut, User as UserIcon } from '@phosphor-icons/react';
 
-export default function StatusBar({ scanStatus, onScanNow, user, onLogout, onAdminClick }) {
+export default function StatusBar({ scanStatus, onScanNow, user, onLogout, onAdminClick, onProfileClick }) {
   const [countdown, setCountdown] = useState(180);
 
   useEffect(() => {
@@ -100,6 +100,18 @@ export default function StatusBar({ scanStatus, onScanNow, user, onLogout, onAdm
                 <span className="text-xs font-mono uppercase tracking-[0.2em]">ADMIN</span>
               </button>
             )}
+            
+            <button
+              onClick={onProfileClick}
+              className="px-4 py-2 bg-white text-[#050505] rounded-none border border-[#050505] hover:bg-[#F4F4F4] transition-colors duration-150 flex items-center gap-2"
+              data-testid="profile-button"
+            >
+              <UserIcon weight="bold" size={16} />
+              <span className="text-xs font-mono uppercase tracking-[0.2em]">PROFIL</span>
+              {user?.notifications_enabled && (
+                <span className="w-2 h-2 bg-[#00C950] rounded-full animate-pulse" />
+              )}
+            </button>
             
             <button
               onClick={onLogout}
