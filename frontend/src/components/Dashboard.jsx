@@ -5,8 +5,10 @@ import { useAuth } from '@/contexts/AuthContext';
 import StatusBar from './StatusBar';
 import FilterPanel from './FilterPanel';
 import ApartmentList from './ApartmentList';
+import InstallPrompt from './InstallPrompt';
 import { Toaster } from './ui/sonner';
 import { toast } from 'sonner';
+import { Funnel, X as XIcon } from '@phosphor-icons/react';
 
 export default function Dashboard() {
   const { user, logout } = useAuth();
@@ -28,6 +30,8 @@ export default function Dashboard() {
   });
   const [loading, setLoading] = useState(true);
   const [filtersLoaded, setFiltersLoaded] = useState(true);
+  // Mobile filter drawer (off-canvas, hidden by default on mobile)
+  const [mobileFilterOpen, setMobileFilterOpen] = useState(false);
 
   // Persist filters to localStorage whenever they change.
   useEffect(() => {
@@ -210,7 +214,8 @@ export default function Dashboard() {
   return (
     <div className="min-h-screen bg-white">
       <Toaster position="top-right" />
-      
+      <InstallPrompt />
+
       <StatusBar 
         scanStatus={scanStatus} 
         onScanNow={handleScanNow}
@@ -220,10 +225,27 @@ export default function Dashboard() {
         onProfileClick={() => navigate('/profile')}
         onStatsClick={() => navigate('/stats')}
       />
-      
+
       <div className="border-t border-[#050505]">
+        {/* Mobile filter toggle — sticky top, full-width, only on small screens */}
+        <div className="lg:hidden sticky top-0 z-30 bg-white border-b border-[#050505] px-4 py-3 flex items-center justify-between">
+          <span className="text-xs font-mono uppercase tracking-[0.2em] text-[#525252]">
+            {apartments.length} WOHNUNGEN
+          </span>
+          <button
+            type="button"
+            onClick={() => setMobileFilterOpen(true)}
+            data-testid="mobile-filter-open"
+            className="px-3 py-2 border border-[#050505] bg-white text-[#050505] text-xs font-mono uppercase tracking-[0.18em] hover:bg-[#F4F4F4] transition-colors duration-150 flex items-center gap-2"
+          >
+            <Funnel weight="bold" size={14} />
+            FILTER & ANSICHT
+          </button>
+        </div>
+
         <div className="grid grid-cols-1 lg:grid-cols-12">
-          <div className="lg:col-span-3 border-r border-[#050505]">
+          {/* Desktop sidebar — hidden on mobile; mobile uses the drawer below */}
+          <div className="hidden lg:block lg:col-span-3 border-r border-[#050505]">
             <FilterPanel 
               filters={filters}
               setFilters={handleFiltersChange}
@@ -231,7 +253,8 @@ export default function Dashboard() {
               setView={setView}
             />
           </div>
-          
+
+          {/* Apartments first on mobile — no filter blocking the top */}
           <div className="lg:col-span-9">
             <ApartmentList 
               apartments={apartments}
@@ -240,6 +263,39 @@ export default function Dashboard() {
             />
           </div>
         </div>
+
+        {/* Mobile drawer — slides in from the right */}
+        {mobileFilterOpen && (
+          <div
+            className="lg:hidden fixed inset-0 z-50 flex"
+            data-testid="mobile-filter-drawer"
+          >
+            <div
+              className="absolute inset-0 bg-black/50"
+              onClick={() => setMobileFilterOpen(false)}
+            />
+            <div className="relative ml-auto w-[88%] max-w-sm bg-white border-l border-[#050505] overflow-y-auto h-full">
+              <div className="sticky top-0 bg-[#050505] text-white px-4 py-3 flex items-center justify-between">
+                <span className="text-xs font-mono uppercase tracking-[0.2em]">FILTER & ANSICHT</span>
+                <button
+                  type="button"
+                  onClick={() => setMobileFilterOpen(false)}
+                  data-testid="mobile-filter-close"
+                  className="p-1 hover:bg-white/10 transition-colors duration-150"
+                  aria-label="Schließen"
+                >
+                  <XIcon weight="bold" size={20} />
+                </button>
+              </div>
+              <FilterPanel
+                filters={filters}
+                setFilters={handleFiltersChange}
+                view={view}
+                setView={(v) => { setView(v); setMobileFilterOpen(false); }}
+              />
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
