@@ -1,0 +1,91 @@
+{
+  "theme": "LIGHT",
+  "archetype": "4 (Swiss & High-Contrast)",
+  "typography": {
+    "fonts": [
+      {
+        "name": "Cabinet Grotesk",
+        "url": "https://api.fontshare.com/v2/css?f[]=cabinet-grotesk@800,500,700,400,900&display=swap",
+        "usage": "Headings"
+      },
+      {
+        "name": "IBM Plex Sans",
+        "url": "https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&display=swap",
+        "usage": "Body"
+      },
+      {
+        "name": "JetBrains Mono",
+        "url": "https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&display=swap",
+        "usage": "Data, Timestamps, Prices, Code"
+      }
+    ],
+    "scale": {
+      "h1": "text-4xl tracking-tighter font-black uppercase",
+      "h2": "text-2xl tracking-tight font-bold",
+      "h3": "text-xl font-bold",
+      "body": "text-base leading-relaxed",
+      "mono_data": "text-sm font-mono tracking-tight",
+      "overline": "text-xs font-mono uppercase tracking-[0.2em]"
+    }
+  },
+  "colors": {
+    "background": "#FFFFFF",
+    "surface": "#F4F4F4",
+    "surface_hover": "#E5E5E5",
+    "border": "#050505",
+    "text_primary": "#050505",
+    "text_secondary": "#525252",
+    "accent_primary": "#002FA7",
+    "accent_alert": "#FF3B30",
+    "accent_success": "#00C950",
+    "accent_warning": "#FFCC00"
+  },
+  "spacing_and_layout": {
+    "strategy": "The 'Control Room' Grid",
+    "grid_classes": "grid grid-cols-1 md:grid-cols-4 lg:grid-cols-12 gap-px bg-[#050505] border-y border-[#050505]",
+    "padding": "p-6 md:p-8",
+    "component_style": "Grid Borders (The 'Technical' Look). Use 1px borders with border-collapse behavior. Surfaces are separated by stark 1px black borders instead of gaps to expose the 'skeleton'."
+  },
+  "components": {
+    "buttons": "Flat, sharp edges (rounded-none). Primary: bg-[#002FA7] text-white hover:bg-black hover:text-white transition-colors. Secondary: bg-white border border-[#050505] text-[#050505] hover:bg-[#F4F4F4].",
+    "cards": "Flat background, rounded-none, no soft shadows. For active state, use sharp hard offset shadow (e.g., 4px 4px 0px #050505) and 1px solid black border.",
+    "inputs": "Shadcn based, but strictly override to rounded-none, border-black ring-offset-white focus-visible:ring-2 focus-visible:ring-[#002FA7] focus-visible:border-black.",
+    "tables_lists": "Dense lists. Rows separated by 1px solid black border. Use JetBrains Mono for numbers/prices/rooms.",
+    "badges": "Square borders (rounded-none), text-xs font-mono uppercase, solid colors. e.g., bg-[#FF3B30] text-white for NEW."
+  },
+  "animations": {
+    "micro": "Instant or very fast transitions (duration-150). No bouncy or slow easing.",
+    "scanner": "A pulsing indicator (bg-[#00C950]) next to 'SCANNING ACTIVE'. Use a mono-spaced countdown timer ticking down from 3:00. Marquee of recent logs ('Checking Immomio... Found 0 new') in a retro-futuristic terminal bar at the bottom."
+  },
+  "media": {
+    "images": [
+      {
+        "url": "https://images.pexels.com/photos/32178051/pexels-photo-32178051.png?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+        "description": "Stylish open-plan living room in modern urban apartment",
+        "category": "apartment_placeholder_1"
+      },
+      {
+        "url": "https://images.unsplash.com/photo-1628592102751-ba83b0314276?crop=entropy&cs=srgb&fm=jpg&q=85",
+        "description": "modern apartment interior",
+        "category": "apartment_placeholder_2"
+      }
+    ]
+  },
+  "icons": {
+    "library": "@phosphor-icons/react",
+    "instructions": "Use 'bold' or 'fill' weights to match the heavy brutalist typography. Examples: Radar, Funnel, Clock, EnvelopeSimple, Buildings."
+  },
+  "testing": {
+    "instructions": "All interactive and key informational elements MUST include a 'data-testid' attribute. Format: kebab-case, role-based. e.g., 'data-testid=\"filter-price-input\"', 'data-testid=\"scan-status-indicator\"'."
+  },
+  "instructions_to_main_agent": [
+    "Build a real-time scanner dashboard for Immomio Hamburg.",
+    "The UI MUST follow a Swiss Brutalist, 'Control Room' aesthetic. Everything must have sharp edges (rounded-none), thick or crisp black borders (1px solid #050505).",
+    "Layout structure: A top navigation/status bar showing active scanning status and next scan timer (3 minutes countdown).",
+    "Sidebar / Filter Panel: Settings (Email config for maximnikityk@ukr.net, Resend integration toggles) and Search Filters (Min/Max Price, Room count).",
+    "Main Content Area: Displays a data-dense grid or feed/history of detected listings. Use the 'Grid Borders' component style to make the table look like an architect's blueprint.",
+    "Typography: Use Cabinet Grotesk for Headings. Use JetBrains Mono for data points like Price, Rooms, Square meters, and timestamps. Use IBM Plex Sans for general body text.",
+    "Do NOT use gradients, soft drop shadows, or rounded corners.",
+    "Write the code using standard .js / .jsx extensions. Do NOT use .tsx."
+  ]
+}
