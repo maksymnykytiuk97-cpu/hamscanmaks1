@@ -1,4 +1,5 @@
 import "@/App.css";
+import { useEffect } from 'react';
 import { BrowserRouter, Routes, Route } from "react-router-dom";
 import Dashboard from "@/components/Dashboard";
 import LoginPage from "@/components/LoginPage";
@@ -7,8 +8,14 @@ import ProfilePage from "@/components/ProfilePage";
 import StatsPage from "@/components/StatsPage";
 import ProtectedRoute from "@/components/ProtectedRoute";
 import { AuthProvider } from "@/contexts/AuthContext";
+import { registerServiceWorker } from "@/lib/push";
 
 function App() {
+  useEffect(() => {
+    // Register the PWA service worker once on mount. Safe to call repeatedly.
+    registerServiceWorker();
+  }, []);
+
   return (
     <div className="App">
       <AuthProvider>

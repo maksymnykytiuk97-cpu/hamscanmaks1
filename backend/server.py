@@ -34,6 +34,11 @@ resend.api_key = os.environ.get('RESEND_API_KEY', '')
 SENDER_EMAIL = os.environ.get('SENDER_EMAIL', 'onboarding@resend.dev')
 RECIPIENT_EMAIL = os.environ.get('RECIPIENT_EMAIL', 'maximnikityk@ukr.net')
 
+# Web Push (VAPID) setup
+VAPID_PRIVATE_KEY = os.environ.get('VAPID_PRIVATE_KEY', '')
+VAPID_PUBLIC_KEY = os.environ.get('VAPID_PUBLIC_KEY', '')
+VAPID_CLAIM_EMAIL = os.environ.get('VAPID_CLAIM_EMAIL', 'mailto:admin@hamburg-scanner.com')
+
 # JWT setup
 JWT_ALGORITHM = "HS256"
 
@@ -1302,6 +1307,16 @@ async def scan_apartments():
                 except Exception as e:
                     logger.error(f"Failed to send email to {email_addr}: {str(e)}")
         
+        # ===== PUSH NOTIFICATIONS =====
+        # Per-user web-push (PWA) — respects each user's profile filters.
+        # Runs even when email is disabled or when user does not have an email
+        # set, so users can opt into push-only delivery.
+        if new_apartments:
+            try:
+                await send_push_notifications_for_new_apartments(new_apartments)
+            except Exception as e:
+                logger.error(f"Push notifications failed: {e}")
+
         scanning_state["last_scan"] = datetime.now(timezone.utc)
         scanning_state["next_scan"] = datetime.now(timezone.utc) + timedelta(minutes=3)
 
@@ -1632,6 +1647,174 @@ class SettingsModel(BaseModel):
 async def save_settings(settings: SettingsModel, current_user: dict = Depends(get_current_user)):
     await db.settings.update_one({}, {"$set": settings.model_dump()}, upsert=True)
     return {"message": "Settings saved"}
+
+
+# ============= WEB PUSH (PWA) =============
+
+def _apartment_matches_filters(apt: dict, prefs: dict) -> bool:
+    """Apply a user's price/rooms filters to an apartment."""
+    if prefs.get('min_price') is not None and (apt.get('price') is None or apt['price'] < prefs['min_price']):
+        return False
+    if prefs.get('max_price') is not None and (apt.get('price') is None or apt['price'] > prefs['max_price']):
+        return False
+    if prefs.get('min_rooms') is not None and (apt.get('rooms') is None or apt['rooms'] < prefs['min_rooms']):
+        return False
+    if prefs.get('max_rooms') is not None and (apt.get('rooms') is None or apt['rooms'] > prefs['max_rooms']):
+        return False
+    return True
+
+
+def _send_single_push(subscription: dict, payload: dict) -> bool:
+    """Send a single Web Push. Returns True if delivered, False if the
+    subscription is gone (404/410) and should be deleted by the caller."""
+    from pywebpush import webpush, WebPushException
+    import json as _json
+    try:
+        webpush(
+            subscription_info=subscription,
+            data=_json.dumps(payload),
+            vapid_private_key=VAPID_PRIVATE_KEY,
+            vapid_claims={"sub": VAPID_CLAIM_EMAIL},
+        )
+        return True
+    except WebPushException as e:
+        # 404 / 410 => subscription expired; caller should remove it.
+        status = getattr(getattr(e, 'response', None), 'status_code', None)
+        if status in (404, 410):
+            return False
+        logger.warning(f"Web push delivery failed ({status}): {e}")
+        return True  # transient error — keep subscription
+
+
+async def send_push_notifications_for_new_apartments(new_apartments: List[dict]) -> None:
+    """Deliver per-user push notifications respecting profile filters.
+    One push per user-batch (groups multiple matching apartments together)."""
+    if not VAPID_PRIVATE_KEY or not new_apartments:
+        return
+
+    users = await db.users.find({}, {
+        "_id": 1, "email": 1,
+        "min_price": 1, "max_price": 1, "min_rooms": 1, "max_rooms": 1,
+    }).to_list(1000)
+
+    for user in users:
+        user_id = str(user['_id'])
+        matched = [a for a in new_apartments if _apartment_matches_filters(a, user)]
+        if not matched:
+            continue
+
+        subs = await db.push_subscriptions.find({"user_id": user_id}).to_list(50)
+        if not subs:
+            continue
+
+        # Build a single payload. If 1 apartment → show its details; if many
+        # → show "N neue Wohnungen in Hamburg" + sample data of the first one.
+        if len(matched) == 1:
+            apt = matched[0]
+            body_parts = []
+            if apt.get('price'): body_parts.append(f"€{int(apt['price'])}")
+            if apt.get('rooms'): body_parts.append(f"{apt['rooms']} Zi.")
+            if apt.get('area'): body_parts.append(f"{int(apt['area'])}m²")
+            if apt.get('district') or apt.get('address'):
+                body_parts.append(apt.get('district') or apt['address'])
+            payload = {
+                "title": f"🏠 Neue Wohnung — {apt.get('landlord', '')}",
+                "body": (apt.get('title') or 'Wohnung in Hamburg')[:80]
+                        + ("\n" + " · ".join(body_parts) if body_parts else ""),
+                "icon": apt.get('image_url') or "/icon-192.png",
+                "badge": "/icon-72.png",
+                "url": apt.get('url') or "/",
+                "tag": f"apt-{apt.get('id', '')}",
+            }
+        else:
+            first = matched[0]
+            payload = {
+                "title": f"🏠 {len(matched)} neue Wohnungen in Hamburg",
+                "body": f"{first.get('title','')[:60]}\nund {len(matched)-1} weitere ...",
+                "icon": "/icon-192.png",
+                "badge": "/icon-72.png",
+                "url": "/",
+                "tag": "apt-batch",
+            }
+
+        # Send to each of the user's devices
+        for sub in subs:
+            sub_info = {
+                "endpoint": sub["endpoint"],
+                "keys": sub["keys"],
+            }
+            ok = await asyncio.to_thread(_send_single_push, sub_info, payload)
+            if not ok:
+                # Subscription is gone — clean it up
+                await db.push_subscriptions.delete_one({"_id": sub["_id"]})
+                logger.info(f"Removed expired push subscription for user {user_id}")
+
+
+@api_router.get("/push/vapid-public-key")
+async def get_vapid_public_key():
+    return {"publicKey": VAPID_PUBLIC_KEY}
+
+
+class PushSubscriptionPayload(BaseModel):
+    endpoint: str
+    keys: dict  # {p256dh, auth}
+
+
+@api_router.post("/push/subscribe")
+async def push_subscribe(
+    sub: PushSubscriptionPayload,
+    current_user: dict = Depends(get_current_user),
+):
+    """Idempotent: same endpoint replaces previous record for this user."""
+    user_id = str(current_user['_id']) if '_id' in current_user else current_user.get('id')
+    doc = {
+        "user_id": user_id,
+        "endpoint": sub.endpoint,
+        "keys": sub.keys,
+        "created_at": datetime.now(timezone.utc),
+    }
+    await db.push_subscriptions.update_one(
+        {"user_id": user_id, "endpoint": sub.endpoint},
+        {"$set": doc},
+        upsert=True,
+    )
+    return {"ok": True}
+
+
+@api_router.post("/push/unsubscribe")
+async def push_unsubscribe(
+    sub: PushSubscriptionPayload,
+    current_user: dict = Depends(get_current_user),
+):
+    user_id = str(current_user['_id']) if '_id' in current_user else current_user.get('id')
+    await db.push_subscriptions.delete_one({"user_id": user_id, "endpoint": sub.endpoint})
+    return {"ok": True}
+
+
+@api_router.post("/push/test")
+async def push_test(current_user: dict = Depends(get_current_user)):
+    """Trigger a test push to all of the calling user's devices."""
+    user_id = str(current_user['_id']) if '_id' in current_user else current_user.get('id')
+    subs = await db.push_subscriptions.find({"user_id": user_id}).to_list(50)
+    if not subs:
+        raise HTTPException(status_code=404, detail="No push subscriptions found for this user")
+    payload = {
+        "title": "🏠 Hamburg Scanner — Test",
+        "body": "Push-Benachrichtigungen funktionieren!",
+        "icon": "/icon-192.png",
+        "badge": "/icon-72.png",
+        "url": "/",
+        "tag": "test-push",
+    }
+    sent = 0
+    for sub in subs:
+        sub_info = {"endpoint": sub["endpoint"], "keys": sub["keys"]}
+        ok = await asyncio.to_thread(_send_single_push, sub_info, payload)
+        if ok:
+            sent += 1
+        else:
+            await db.push_subscriptions.delete_one({"_id": sub["_id"]})
+    return {"ok": True, "sent": sent}
 
 
 # ============= WEBSOCKET (live updates) =============

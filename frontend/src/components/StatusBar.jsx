@@ -1,28 +1,6 @@
-import { useEffect, useState } from 'react';
-import { Broadcast, Clock, Buildings, Gear, SignOut, User as UserIcon, ChartBar } from '@phosphor-icons/react';
+import { Broadcast, Buildings, Gear, SignOut, User as UserIcon, ChartBar } from '@phosphor-icons/react';
 
 export default function StatusBar({ scanStatus, onScanNow, user, onLogout, onAdminClick, onProfileClick, onStatsClick }) {
-  const [countdown, setCountdown] = useState(180);
-
-  useEffect(() => {
-    const timer = setInterval(() => {
-      setCountdown(prev => {
-        if (prev <= 1) {
-          return 180;
-        }
-        return prev - 1;
-      });
-    }, 1000);
-
-    return () => clearInterval(timer);
-  }, []);
-
-  const formatTime = (seconds) => {
-    const mins = Math.floor(seconds / 60);
-    const secs = seconds % 60;
-    return `${mins}:${secs.toString().padStart(2, '0')}`;
-  };
-
   const formatDateTime = (dateStr) => {
     if (!dateStr) return 'Nie';
     const date = new Date(dateStr);
@@ -57,13 +35,6 @@ export default function StatusBar({ scanStatus, onScanNow, user, onLogout, onAdm
               }`} data-testid="scan-indicator" />
               <span className="text-xs font-mono uppercase tracking-[0.2em]" data-testid="scan-status-text">
                 {scanStatus?.is_scanning ? 'SCANNING' : 'BEREIT'}
-              </span>
-            </div>
-
-            <div className="flex items-center gap-2 px-4 py-2 border border-[#050505] rounded-none">
-              <Clock weight="bold" size={16} />
-              <span className="text-sm font-mono tracking-tight" data-testid="next-scan-countdown">
-                {formatTime(countdown)}
               </span>
             </div>
 

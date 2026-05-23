@@ -13,9 +13,17 @@ import {
   BellSlash,
   Funnel,
   CurrencyDollar,
-  Bed
+  Bed,
+  DeviceMobile
 } from '@phosphor-icons/react';
 import { toast, Toaster } from 'sonner';
+import {
+  isPushSupported,
+  subscribeToPush,
+  unsubscribeFromPush,
+  getCurrentSubscription,
+  sendTestPush,
+} from '@/lib/push';
 
 export default function ProfilePage() {
   const { user, checkAuth } = useAuth();
@@ -31,10 +39,48 @@ export default function ProfilePage() {
   });
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  
+  // Push notification state
+  const [pushSupported] = useState(() => isPushSupported());
+  const [pushSubscribed, setPushSubscribed] = useState(false);
+  const [pushBusy, setPushBusy] = useState(false);
+
   useEffect(() => {
     fetchProfile();
+    if (isPushSupported()) {
+      getCurrentSubscription().then((s) => setPushSubscribed(!!s)).catch(() => {});
+    }
   }, []);
+
+  const handlePushToggle = async () => {
+    setPushBusy(true);
+    try {
+      if (pushSubscribed) {
+        await unsubscribeFromPush();
+        setPushSubscribed(false);
+        toast.success('Push-Benachrichtigungen deaktiviert');
+      } else {
+        await subscribeToPush();
+        setPushSubscribed(true);
+        toast.success('Push-Benachrichtigungen aktiviert!');
+      }
+    } catch (e) {
+      toast.error(e?.message || 'Fehler bei Push-Einstellungen');
+    } finally {
+      setPushBusy(false);
+    }
+  };
+
+  const handlePushTest = async () => {
+    setPushBusy(true);
+    try {
+      const res = await sendTestPush();
+      toast.success(`Test-Push gesendet (${res?.sent || 0} Gerät(e))`);
+    } catch (e) {
+      toast.error(formatApiErrorDetail(e) || 'Test-Push fehlgeschlagen');
+    } finally {
+      setPushBusy(false);
+    }
+  };
   
   const fetchProfile = async () => {
     try {
@@ -175,6 +221,54 @@ export default function ProfilePage() {
                     </p>
                   </div>
                 </label>
+              </div>
+
+              {/* Push notifications (PWA) */}
+              <div className="border border-[#050505] bg-[#F4F4F4] p-4" data-testid="push-section">
+                <div className="flex items-start justify-between gap-4 flex-wrap">
+                  <div className="flex items-start gap-3 flex-1 min-w-[260px]">
+                    <DeviceMobile
+                      weight="bold"
+                      size={28}
+                      className={pushSubscribed ? 'text-[#00C950] mt-1' : 'text-[#525252] mt-1'}
+                    />
+                    <div>
+                      <p className="font-bold text-sm uppercase tracking-tight">PUSH-BENACHRICHTIGUNGEN</p>
+                      <p className="text-xs text-[#525252] mt-1">
+                        Sofort-Push aufs Gerät (auch bei geschlossenem Browser), gefiltert nach Ihren persönlichen Einstellungen.
+                      </p>
+                      {!pushSupported && (
+                        <p className="text-xs text-[#E60023] mt-2 font-mono">
+                          Dieser Browser unterstützt keine Push-Benachrichtigungen.
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                  <div className="flex gap-2">
+                    <button
+                      type="button"
+                      onClick={handlePushToggle}
+                      disabled={!pushSupported || pushBusy}
+                      data-testid="push-toggle-button"
+                      className={`px-4 py-2 border border-[#050505] text-xs font-mono uppercase tracking-[0.18em] transition-colors duration-150 disabled:opacity-50 disabled:cursor-not-allowed ${
+                        pushSubscribed ? 'bg-[#FF3B30] text-white hover:bg-black' : 'bg-[#002FA7] text-white hover:bg-black'
+                      }`}
+                    >
+                      {pushBusy ? '…' : pushSubscribed ? 'DEAKTIVIEREN' : 'AKTIVIEREN'}
+                    </button>
+                    {pushSubscribed && (
+                      <button
+                        type="button"
+                        onClick={handlePushTest}
+                        disabled={pushBusy}
+                        data-testid="push-test-button"
+                        className="px-4 py-2 border border-[#050505] bg-white text-[#050505] text-xs font-mono uppercase tracking-[0.18em] hover:bg-[#F4F4F4] transition-colors duration-150 disabled:opacity-50"
+                      >
+                        TEST
+                      </button>
+                    )}
+                  </div>
+                </div>
               </div>
             </div>
           </div>
