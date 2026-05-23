@@ -15,34 +15,26 @@ export default function Dashboard() {
   const [apartments, setApartments] = useState([]);
   const [scanStatus, setScanStatus] = useState(null);
   const [view, setView] = useState('new');
-  const [filters, setFilters] = useState({
-    minPrice: '',
-    maxPrice: '',
-    minRooms: '',
-    maxRooms: ''
+  // Dashboard filters are LOCAL to the browser session (kept in localStorage).
+  // They never touch the user's profile so other tabs/users/email-filters stay
+  // intact. The profile-level filters (used for email notifications) are
+  // edited separately on /profile.
+  const [filters, setFilters] = useState(() => {
+    try {
+      const raw = localStorage.getItem('dashboard_filters');
+      if (raw) return JSON.parse(raw);
+    } catch (_) { /* ignore */ }
+    return { minPrice: '', maxPrice: '', minRooms: '', maxRooms: '' };
   });
   const [loading, setLoading] = useState(true);
-  const [filtersLoaded, setFiltersLoaded] = useState(false);
+  const [filtersLoaded, setFiltersLoaded] = useState(true);
 
-  // Load user's personal filters from profile on mount
+  // Persist filters to localStorage whenever they change.
   useEffect(() => {
-    const loadFilters = async () => {
-      try {
-        const { data } = await api.get('/api/profile');
-        setFilters({
-          minPrice: data.min_price ?? '',
-          maxPrice: data.max_price ?? '',
-          minRooms: data.min_rooms ?? '',
-          maxRooms: data.max_rooms ?? '',
-        });
-      } catch (e) {
-        // Continue with default empty filters
-      } finally {
-        setFiltersLoaded(true);
-      }
-    };
-    loadFilters();
-  }, []);
+    try {
+      localStorage.setItem('dashboard_filters', JSON.stringify(filters));
+    } catch (_) { /* ignore quota errors */ }
+  }, [filters]);
 
   useEffect(() => {
     if (!filtersLoaded) return;
@@ -63,6 +55,62 @@ export default function Dashboard() {
   // the listing on either, and show a toast on truly new apartments.
   useEffect(() => {
     if (!filtersLoaded) return;
+
+    // Ask the browser for permission to show OS-level notifications (once)
+    if (typeof Notification !== 'undefined' && Notification.permission === 'default') {
+      try { Notification.requestPermission(); } catch (_) {}
+    }
+
+    // Build a short attention-grabbing "ping" tone using WebAudio.
+    // Two short tones (E5 → A5) — friendly, not alarming.
+    const playPing = () => {
+      try {
+        const Ctx = window.AudioContext || window.webkitAudioContext;
+        if (!Ctx) return;
+        const ctx = new Ctx();
+        const playTone = (freq, startTime, duration = 0.18) => {
+          const osc = ctx.createOscillator();
+          const gain = ctx.createGain();
+          osc.type = 'sine';
+          osc.frequency.value = freq;
+          gain.gain.setValueAtTime(0, startTime);
+          gain.gain.linearRampToValueAtTime(0.25, startTime + 0.02);
+          gain.gain.exponentialRampToValueAtTime(0.0001, startTime + duration);
+          osc.connect(gain).connect(ctx.destination);
+          osc.start(startTime);
+          osc.stop(startTime + duration);
+        };
+        const t = ctx.currentTime;
+        playTone(659.25, t);          // E5
+        playTone(880.00, t + 0.15);   // A5
+        setTimeout(() => ctx.close().catch(() => {}), 700);
+      } catch (_) { /* ignore */ }
+    };
+
+    const showDesktopNotification = (apt) => {
+      if (typeof Notification === 'undefined' || Notification.permission !== 'granted') return;
+      try {
+        const body = [
+          apt.price ? `€${apt.price}` : null,
+          apt.rooms ? `${apt.rooms} Zi.` : null,
+          apt.area ? `${apt.area}m²` : null,
+          apt.district || apt.address,
+        ].filter(Boolean).join(' · ');
+        const n = new Notification(`🏠 Нова квартира в Гамбурзі`, {
+          body: `${(apt.title || 'Wohnung').slice(0, 90)}\n${body}`.trim(),
+          icon: apt.image_url || '/favicon.ico',
+          tag: `apt-${apt.id}`,
+          requireInteraction: false,
+        });
+        n.onclick = () => {
+          window.focus();
+          if (apt.url) window.open(apt.url, '_blank', 'noopener');
+          n.close();
+        };
+        setTimeout(() => n.close(), 12000);
+      } catch (_) { /* ignore */ }
+    };
+
     const httpUrl = process.env.REACT_APP_BACKEND_URL || '';
     const wsUrl = httpUrl.replace(/^http/, 'ws') + '/api/ws/apartments';
     let ws;
@@ -77,6 +125,8 @@ export default function Dashboard() {
             if (msg.type === 'new_apartment') {
               const apt = msg.apartment || {};
               toast.success(`🏠 Нова квартира: ${apt.title?.slice(0, 80) || 'без назви'}`);
+              playPing();
+              showDesktopNotification(apt);
               fetchApartments();
             } else if (msg.type === 'scan_finished') {
               fetchScanStatus();
@@ -146,22 +196,10 @@ export default function Dashboard() {
     }
   };
   
-  // Save filters to user profile (debounced via explicit save)
-  const handleFiltersChange = async (newFilters) => {
-    setFilters(newFilters);
-    // Persist to profile
-    try {
-      await api.put('/api/profile', {
-        notification_email: user?.notification_email || user?.email,
-        notifications_enabled: user?.notifications_enabled ?? false,
-        min_price: newFilters.minPrice === '' ? null : parseFloat(newFilters.minPrice),
-        max_price: newFilters.maxPrice === '' ? null : parseFloat(newFilters.maxPrice),
-        min_rooms: newFilters.minRooms === '' ? null : parseFloat(newFilters.minRooms),
-        max_rooms: newFilters.maxRooms === '' ? null : parseFloat(newFilters.maxRooms),
-      });
-    } catch (e) {
-      // silent
-    }
+  // Local-only filter setter — no backend call.
+  // Profile-level filters (for email notifications) live on /profile.
+  const handleFiltersChange = (next) => {
+    setFilters((prev) => (typeof next === 'function' ? next(prev) : next));
   };
   
   const handleLogout = async () => {
