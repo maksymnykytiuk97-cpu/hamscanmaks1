@@ -120,6 +120,24 @@ export default function ApartmentList({ apartments, loading, view, onMarkSeen })
                   )}
                 </div>
 
+                {/* Address */}
+                {apt.address && (
+                  <div className="mb-2">
+                    <p className="text-sm text-[#525252]" data-testid={`apartment-address-${index}`}>
+                      📍 {apt.address}
+                    </p>
+                  </div>
+                )}
+                
+                {/* Landlord */}
+                {apt.landlord && (
+                  <div className="mb-4">
+                    <p className="text-xs font-mono text-[#525252] uppercase tracking-[0.1em]" data-testid={`apartment-landlord-${index}`}>
+                      🏢 {apt.landlord}
+                    </p>
+                  </div>
+                )}
+
                 {/* Meta Info */}
                 <div className="flex items-center gap-2 mb-4">
                   <span className="text-xs font-mono text-[#525252]" data-testid={`apartment-found-at-${index}`}>

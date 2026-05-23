@@ -1,18 +1,21 @@
 import { useState, useEffect } from 'react';
-import axios from 'axios';
+import { useNavigate } from 'react-router-dom';
+import { api } from '@/lib/api';
+import { useAuth } from '@/contexts/AuthContext';
 import StatusBar from './StatusBar';
 import FilterPanel from './FilterPanel';
 import ApartmentList from './ApartmentList';
 import { Toaster } from './ui/sonner';
 import { toast } from 'sonner';
-
-const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
-const API = `${BACKEND_URL}/api`;
+import { Gear, SignOut } from '@phosphor-icons/react';
 
 export default function Dashboard() {
+  const { user, logout } = useAuth();
+  const navigate = useNavigate();
+  
   const [apartments, setApartments] = useState([]);
   const [scanStatus, setScanStatus] = useState(null);
-  const [view, setView] = useState('new'); // 'new' or 'history'
+  const [view, setView] = useState('new');
   const [filters, setFilters] = useState({
     minPrice: '',
     maxPrice: '',
@@ -25,13 +28,13 @@ export default function Dashboard() {
     fetchApartments();
     fetchScanStatus();
     
-    // Poll for updates every 30 seconds
     const interval = setInterval(() => {
       fetchApartments();
       fetchScanStatus();
     }, 30000);
     
     return () => clearInterval(interval);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [view, filters]);
 
   const fetchApartments = async () => {
@@ -40,27 +43,26 @@ export default function Dashboard() {
       
       if (filters.minPrice) params.min_price = parseFloat(filters.minPrice);
       if (filters.maxPrice) params.max_price = parseFloat(filters.maxPrice);
-      if (filters.minRooms) params.min_rooms = parseInt(filters.minRooms);
-      if (filters.maxRooms) params.max_rooms = parseInt(filters.maxRooms);
+      if (filters.minRooms) params.min_rooms = parseFloat(filters.minRooms);
+      if (filters.maxRooms) params.max_rooms = parseFloat(filters.maxRooms);
       
       if (view === 'new') {
         params.status = 'new';
       }
       
-      const endpoint = view === 'history' ? `${API}/apartments/history` : `${API}/apartments`;
-      const response = await axios.get(endpoint, { params });
+      const endpoint = view === 'history' ? '/api/apartments/history' : '/api/apartments';
+      const response = await api.get(endpoint, { params });
       setApartments(response.data);
       setLoading(false);
     } catch (error) {
       console.error('Error fetching apartments:', error);
-      toast.error('Fehler beim Laden der Wohnungen');
       setLoading(false);
     }
   };
 
   const fetchScanStatus = async () => {
     try {
-      const response = await axios.get(`${API}/scan-status`);
+      const response = await api.get('/api/scan-status');
       setScanStatus(response.data);
     } catch (error) {
       console.error('Error fetching scan status:', error);
@@ -69,28 +71,30 @@ export default function Dashboard() {
 
   const handleScanNow = async () => {
     try {
-      await axios.post(`${API}/scan-now`);
+      await api.post('/api/scan-now');
       toast.success('Scan gestartet');
       setTimeout(() => {
         fetchApartments();
         fetchScanStatus();
       }, 5000);
     } catch (error) {
-      console.error('Error triggering scan:', error);
       toast.error(error.response?.data?.detail || 'Fehler beim Starten des Scans');
     }
   };
 
   const handleMarkSeen = async (apartmentId) => {
     try {
-      await axios.post(`${API}/apartments/${apartmentId}/mark-seen`);
-      toast.success('Als gesehen markiert');
+      await api.post(`/api/apartments/${apartmentId}/mark-seen`);
       fetchApartments();
       fetchScanStatus();
     } catch (error) {
-      console.error('Error marking apartment as seen:', error);
       toast.error('Fehler beim Markieren');
     }
+  };
+  
+  const handleLogout = async () => {
+    await logout();
+    navigate('/login');
   };
 
   return (
@@ -100,11 +104,13 @@ export default function Dashboard() {
       <StatusBar 
         scanStatus={scanStatus} 
         onScanNow={handleScanNow}
+        user={user}
+        onLogout={handleLogout}
+        onAdminClick={() => navigate('/admin')}
       />
       
       <div className="border-t border-[#050505]">
         <div className="grid grid-cols-1 lg:grid-cols-12">
-          {/* Filter Panel */}
           <div className="lg:col-span-3 border-r border-[#050505]">
             <FilterPanel 
               filters={filters}
@@ -114,7 +120,6 @@ export default function Dashboard() {
             />
           </div>
           
-          {/* Main Content */}
           <div className="lg:col-span-9">
             <ApartmentList 
               apartments={apartments}

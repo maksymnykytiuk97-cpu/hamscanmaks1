@@ -1,0 +1,47 @@
+{
+  "summary": "Hamburg Apartment Scanner — full backend + frontend integration testing. 18/18 pytest tests passed against deployed REACT_APP_BACKEND_URL. Frontend Playwright e2e: login, dashboard with REAL apartment data, admin panel user/URL CRUD, logout — all PASS. Two real apartments from tenant.immomio.com displayed with full metadata (title, price €571.89 / €1296.59, rooms 1.5 / 4.5, area, district Bramfeld/Moorburg, address, landlord SAGA, image).",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "/api/scan-status", "issue": "next_scan only set once at startup; not updated after each scheduled scan completes — UI countdown is purely client-side and may drift."},
+      {"endpoint": "startup", "issue": "Uses deprecated @app.on_event; should migrate to FastAPI lifespan handlers."},
+      {"endpoint": "/api/auth/logout", "issue": "Requires authentication (Depends(get_current_user)); a stale/expired cookie causes 401 on logout. Consider making logout idempotent (always clear cookies, even if not authenticated)."},
+      {"endpoint": "/api/admin/users/{id}", "issue": "Self-delete check compares user_id (str) to admin['_id'] (also str, OK), but if admin's _id is ObjectId vs string this could fail silently — current behaviour OK but fragile."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Dashboard StatusBar", "issues": ["Countdown timer (3:00) is purely client-side and not synchronized with backend scheduler — visible drift over time."]},
+      {"screen": "AdminPanel - new user password input", "issues": ["type=text instead of type=password — passwords are shown in clear text while typing. Should be type=password with optional show/hide toggle."]}
+    ]
+  },
+  "test_report_links": ["/app/backend/tests/test_hamburg_scanner.py", "/app/test_reports/pytest/pytest_results.xml"],
+  "action_items": [
+    "(Low) Make /api/auth/logout idempotent so it never returns 401.",
+    "(Low) Change new-user-password input to type='password' in AdminPanel.jsx for security/UX.",
+    "(Low) Sync countdown with backend next_scan and update next_scan in scanning_state after each completed scan.",
+    "(Optional) Migrate startup/shutdown to FastAPI lifespan handlers.",
+    "RESEND_API_KEY is empty in backend/.env — emails won't be sent (no-op handled gracefully)."
+  ],
+  "critical_code_review_comments": [
+    "Auth playbook compliance: bcrypt with $2b$, httpOnly+secure+samesite=none cookies, CORS allow_origins explicit + allow_credentials=true, seed_admin updates existing admin if password changed — ALL OK.",
+    "Scraper uses real Playwright; correctly merges SAGA + DuckDuckGo + manual URLs; gracefully filters non-Hamburg.",
+    "MongoDB _id excluded via projection or converted to str — OK.",
+    "Frontend uses process.env.REACT_APP_BACKEND_URL and withCredentials=true — OK.",
+    "No brute-force lockout / rate limiting on /api/auth/login — recommend adding (per auth playbook lockout after 5 fails).",
+    "JWT_SECRET is hardcoded in .env (not generated dynamically) — OK for preview but rotate for prod.",
+    "scan_apartments() called at startup AND every 3min; running synchronous Playwright via asyncio.to_thread is correct."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_hamburg_scanner.py",
+    "/app/memory/test_credentials.md"
+  ],
+  "success_rate": {"backend": "100% (18/18)", "frontend": "100%"},
+  "test_credentials": "admin@hamburg-scanner.com / admin123 (admin role, auto-seeded)",
+  "seed_data_creation": "Created and deleted ephemeral TEST_ users and manual URLs during testing. Cleanup performed; no leftover test data.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "pytest suite at /app/backend/tests/test_hamburg_scanner.py covers auth, apartments (incl filters), scan, admin users CRUD, admin manual URLs CRUD, RBAC (401/403), logout. Real apartment data flows from tenant.immomio.com via Playwright through DB to UI. Two seeded manual URLs (5650db80... / 2788b147...) produce 2 apartments in DB shown on dashboard."
+}
