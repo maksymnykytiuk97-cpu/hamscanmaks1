@@ -21,6 +21,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Python deps
 COPY requirements.txt ./
 RUN pip install --upgrade pip && pip install -r requirements.txt
+# Playwright is excluded from requirements.txt to keep Emergent native deploy
+# building cleanly. We install it explicitly here so Railway gets browser
+# scraping (Vonovia) support.
+RUN pip install playwright==1.49.0
 
 # Playwright Chromium (browser binary)
 RUN python -m playwright install --with-deps chromium

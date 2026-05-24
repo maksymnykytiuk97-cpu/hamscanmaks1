@@ -158,11 +158,31 @@ def set_auth_cookies(response: Response, access_token: str, refresh_token: str):
 
 # ============= SCRAPER FUNCTIONS =============
 
+# Playwright is optional. Some deploy environments (e.g. Emergent native)
+# cannot install the Chromium binary at build time. When unavailable, the
+# scrapers that rely on it skip cleanly while the GraphQL/HTTP-based ones
+# (Immomio, SAGA, GCV, BDS, VHW, BGFG, Hamburger Wohnen, Walddörfer) continue
+# to work. Set PLAYWRIGHT_DISABLED=1 to force-skip without trying the import.
+_PLAYWRIGHT_DISABLED = os.environ.get("PLAYWRIGHT_DISABLED", "0").lower() in ("1", "true", "yes")
+
+def _import_playwright_sync():
+    """Return playwright.sync_api.sync_playwright or None if unavailable."""
+    if _PLAYWRIGHT_DISABLED:
+        return None
+    try:
+        from playwright.sync_api import sync_playwright  # noqa: WPS433
+        return sync_playwright
+    except Exception as e:
+        logger.warning(f"Playwright unavailable, browser-based scrapers will be skipped: {e}")
+        return None
+
+
 def parse_immomio_listing(url: str) -> Optional[dict]:
     """Parse a single immomio.com/apply/{uuid} page using Playwright"""
+    sync_playwright = _import_playwright_sync()
+    if sync_playwright is None:
+        return None
     try:
-        from playwright.sync_api import sync_playwright
-        
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
             context = browser.new_context(
@@ -328,9 +348,10 @@ def _scrape_landlord_pages(start_url: str, detail_link_pattern: str, base_url: s
     import time
     immomio_urls = set()
     
+    sync_playwright = _import_playwright_sync()
+    if sync_playwright is None:
+        return list(immomio_urls)
     try:
-        from playwright.sync_api import sync_playwright
-        
         with sync_playwright() as p:
             browser = p.chromium.launch(
                 headless=True,
@@ -754,9 +775,10 @@ def scrape_vonovia_hamburg() -> List[dict]:
     import time
     apartments = []
     
+    sync_playwright = _import_playwright_sync()
+    if sync_playwright is None:
+        return apartments
     try:
-        from playwright.sync_api import sync_playwright
-        
         with sync_playwright() as p:
             browser = p.chromium.launch(
                 headless=True,
