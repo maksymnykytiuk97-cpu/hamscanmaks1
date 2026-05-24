@@ -1869,11 +1869,17 @@ async def apartments_ws(websocket: WebSocket):
 app.include_router(auth_router)
 app.include_router(api_router)
 
-# CORS - allow specific frontend origin with credentials
-frontend_url = os.environ.get("FRONTEND_URL", "https://hamburg-listings.preview.emergentagent.com")
+# CORS — allow multiple origins from CORS_ORIGINS env (comma-separated),
+# plus all Vercel preview deployments of this project via regex.
+_cors_raw = os.environ.get("CORS_ORIGINS") or os.environ.get(
+    "FRONTEND_URL", "https://hamburg-listings.preview.emergentagent.com"
+)
+allowed_origins = [o.strip() for o in _cors_raw.split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[frontend_url],
+    allow_origins=allowed_origins,
+    # Match every Vercel preview/production URL (incl. hashed previews)
+    allow_origin_regex=r"https://.*\.vercel\.app",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
