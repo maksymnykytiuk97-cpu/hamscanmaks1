@@ -1,4 +1,4 @@
-import { Funnel, EnvelopeSimple, ClockCounterClockwise, Lightning } from '@phosphor-icons/react';
+import { Funnel, ClockCounterClockwise, Lightning } from '@phosphor-icons/react';
 import { Input } from './ui/input';
 import { Label } from './ui/label';
 
@@ -124,20 +124,6 @@ export default function FilterPanel({ filters, setFilters, view, setView }) {
         >
           <span className="text-xs font-mono uppercase tracking-[0.2em]">FILTER ZURÜCKSETZEN</span>
         </button>
-      </div>
-
-      {/* Email Info */}
-      <div className="border-t border-[#050505] pt-6 mt-6">
-        <div className="flex items-center gap-2 mb-2">
-          <EnvelopeSimple weight="bold" size={18} />
-          <h3 className="text-sm font-mono uppercase tracking-[0.2em]">EMAIL</h3>
-        </div>
-        <p className="text-xs text-[#525252] font-mono break-all" data-testid="email-notification-address">
-          maximnikityk@ukr.net
-        </p>
-        <p className="text-xs text-[#525252] mt-2">
-          Benachrichtigungen werden an diese E-Mail-Adresse gesendet, wenn neue Wohnungen gefunden werden.
-        </p>
       </div>
     </div>
   );
