@@ -41,7 +41,7 @@ export default function ApartmentList({ apartments, loading, view }) {
       </div>
 
       <div className="grid grid-cols-1 gap-px bg-[#050505]">
-        {apartments.map((apt, index) => (
+        {(Array.isArray(apartments) ? apartments : []).map((apt, index) => (
           <div 
             key={apt.id} 
             className="bg-white p-6 border border-[#050505] hover:shadow-[4px_4px_0px_#050505] transition-all duration-150"

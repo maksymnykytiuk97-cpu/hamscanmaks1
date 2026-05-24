@@ -170,7 +170,7 @@ export default function Dashboard() {
       params.status = view === 'history' ? 'history' : 'new';
       
       const response = await api.get('/api/apartments', { params });
-      setApartments(response.data);
+      setApartments(Array.isArray(response.data) ? response.data : []);
       setLoading(false);
     } catch (error) {
       console.error('Error fetching apartments:', error);
