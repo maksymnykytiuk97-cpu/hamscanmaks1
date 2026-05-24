@@ -1,10 +1,9 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": "create-react-app",
   "buildCommand": "yarn build",
   "installCommand": "yarn install --frozen-lockfile",
   "outputDirectory": "build",
-  "framework": "create-react-app",
-  "rootDirectory": "frontend",
   "headers": [
     {
       "source": "/sw.js",
@@ -27,3 +26,4 @@
     }
   ]
 }
+
