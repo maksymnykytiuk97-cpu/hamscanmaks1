@@ -75,12 +75,24 @@ export default function AdminPanel() {
   
   const handleAddUrl = async (e) => {
     e.preventDefault();
+    const loadingToast = toast.loading('URL wird hinzugefügt & Wohnung wird geladen...');
     try {
-      await api.post('/api/admin/manual-urls', { url: newUrl });
-      toast.success('URL hinzugefügt');
+      const { data } = await api.post('/api/admin/manual-urls', { url: newUrl });
+      toast.dismiss(loadingToast);
+
+      if (data?.apartment) {
+        const title = data.apartment.title || 'Wohnung';
+        toast.success(`URL hinzugefügt — Wohnung gefunden: ${title}`);
+      } else if (data?.parse_error) {
+        toast.warning(`URL hinzugefügt, aber Wohnung konnte nicht geladen werden: ${data.parse_error}. Wird beim nächsten Scan erneut versucht.`);
+      } else {
+        toast.success('URL hinzugefügt');
+      }
+
       setNewUrl('');
       fetchManualUrls();
     } catch (err) {
+      toast.dismiss(loadingToast);
       toast.error(formatApiErrorDetail(err.response?.data?.detail) || 'Fehler');
     }
   };

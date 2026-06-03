@@ -1514,7 +1514,50 @@ async def add_manual_url(data: ManualUrlAdd, admin: dict = Depends(get_admin_use
         "added_at": datetime.now(timezone.utc).isoformat()
     })
     
-    return {"message": "URL added", "url": data.url}
+    # ===== IMMEDIATELY parse this URL so the apartment shows up on the dashboard =====
+    normalized_url = data.url.replace('/de/apply/', '/apply/')
+    apartment_payload = None
+    parse_error = None
+    try:
+        apartment = await asyncio.to_thread(parse_immomio_listing, normalized_url)
+        if apartment:
+            apt_dict = apartment.copy()
+            if isinstance(apt_dict.get('found_at'), datetime):
+                apt_dict['found_at'] = apt_dict['found_at'].isoformat()
+
+            existing_apt = await db.apartments.find_one({"id": apt_dict["id"]}, {"_id": 0})
+            if not existing_apt:
+                await db.apartments.insert_one(apt_dict)
+                logger.info(f"[manual-url] New apartment inserted: {apt_dict.get('title')} ({apt_dict['id']})")
+            else:
+                # Fill in any missing fields we now know
+                update_fields = {}
+                for field in ['price', 'rooms', 'area', 'district', 'address', 'image_url', 'landlord', 'title']:
+                    if apt_dict.get(field) is not None and existing_apt.get(field) in (None, ""):
+                        update_fields[field] = apt_dict[field]
+                if update_fields:
+                    await db.apartments.update_one({"id": apt_dict["id"]}, {"$set": update_fields})
+                    logger.info(f"[manual-url] Updated apartment {apt_dict['id']} fields: {list(update_fields.keys())}")
+
+            # Strip _id and broadcast over WebSocket so all open dashboards see it live
+            apartment_payload = {k: v for k, v in apt_dict.items() if k != '_id'}
+            try:
+                await ws_manager.broadcast({"type": "new_apartment", "apartment": apartment_payload})
+            except Exception as e:
+                logger.debug(f"WS broadcast (manual-url) failed: {e}")
+        else:
+            parse_error = "Listing konnte nicht geladen werden (möglicherweise abgelaufen oder offline)"
+            logger.warning(f"[manual-url] parse_immomio_listing returned None for {normalized_url}")
+    except Exception as e:
+        parse_error = str(e)
+        logger.error(f"[manual-url] Parse error for {normalized_url}: {e}")
+
+    return {
+        "message": "URL added",
+        "url": data.url,
+        "apartment": apartment_payload,
+        "parse_error": parse_error,
+    }
 
 @api_router.delete("/admin/manual-urls")
 async def remove_manual_url(data: ManualUrlAdd, admin: dict = Depends(get_admin_user)):
