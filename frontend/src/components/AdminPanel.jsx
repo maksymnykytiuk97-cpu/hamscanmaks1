@@ -80,7 +80,16 @@ export default function AdminPanel() {
       const { data } = await api.post('/api/admin/manual-urls', { url: newUrl });
       toast.dismiss(loadingToast);
 
-      if (data?.apartment) {
+      const count = data?.apartments_count ?? 0;
+      if (data?.type === 'homepage_token') {
+        if (count > 0) {
+          toast.success(`Landlord-Token hinzugefügt — ${count} neue Wohnung(en) sofort veröffentlicht. Wird alle 3 Min automatisch geprüft.`);
+        } else if (data?.parse_error) {
+          toast.info(`Token gespeichert: ${data.parse_error}`);
+        } else {
+          toast.success('Landlord-Token hinzugefügt. Wird alle 3 Min auf neue Wohnungen geprüft.');
+        }
+      } else if (data?.apartment) {
         const title = data.apartment.title || 'Wohnung';
         toast.success(`URL hinzugefügt — Wohnung gefunden: ${title}`);
       } else if (data?.parse_error) {
@@ -257,7 +266,10 @@ export default function AdminPanel() {
           </h2>
           
           <p className="text-xs text-[#525252] mb-4">
-            Fügen Sie immomio.com URLs manuell hinzu, die der Scanner überwachen soll.
+            Fügen Sie immomio URLs manuell hinzu — der Scanner überwacht sie automatisch.<br/>
+          <strong>Zwei Typen möglich:</strong><br/>
+            • <code className="font-mono">tenant.immomio.com/apply/...</code> — Einzelne Wohnung<br/>
+            • <code className="font-mono">homepage.immomio.com/de/properties?token=...</code> — Vermieter-Pool (alle Wohnungen, alle 3 Min auto-aktualisiert)
           </p>
           
           {/* Add URL Form */}
@@ -270,7 +282,9 @@ export default function AdminPanel() {
                 required
                 value={newUrl}
                 onChange={(e) => setNewUrl(e.target.value)}
-                placeholder="https://tenant.immomio.com/apply/..."
+                placeholder="tenant.immomio.com/apply/... oder homepage.immomio.com/de/properties?token=..."
+
+
                 className="rounded-none border-[#050505] bg-white font-mono text-xs"
                 data-testid="new-url-input"
               />
@@ -295,14 +309,21 @@ export default function AdminPanel() {
             ) : (
               manualUrls.map((item, idx) => (
                 <div key={idx} className="bg-white p-4 flex items-center justify-between gap-4" data-testid={`url-row-${idx}`}>
-                  <a 
-                    href={item.url} 
-                    target="_blank" 
-                    rel="noopener noreferrer"
-                    className="font-mono text-xs text-[#002FA7] hover:underline break-all flex-1"
-                  >
-                    {item.url}
-                  </a>
+                  <div className="flex items-center gap-2 flex-1 min-w-0">
+                    {item.type === 'homepage_token' && (
+                      <span className="px-2 py-1 bg-[#002FA7] text-white text-[10px] font-mono uppercase tracking-wider flex-shrink-0">
+                        POOL
+                      </span>
+                    )}
+                    <a 
+                      href={item.url} 
+                      target="_blank" 
+                      rel="noopener noreferrer"
+                      className="font-mono text-xs text-[#002FA7] hover:underline break-all"
+                    >
+                      {item.url}
+                    </a>
+                  </div>
                   <button
                     onClick={() => handleRemoveUrl(item.url)}
                     className="px-3 py-2 bg-white border border-[#FF3B30] text-[#FF3B30] hover:bg-[#FF3B30] hover:text-white transition-colors duration-150 flex-shrink-0"

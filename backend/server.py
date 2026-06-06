@@ -177,170 +177,177 @@ def _import_playwright_sync():
         return None
 
 
-def parse_immomio_listing(url: str) -> Optional[dict]:
-    """Parse a single immomio.com/apply/{uuid} page using Playwright"""
-    sync_playwright = _import_playwright_sync()
-    if sync_playwright is None:
+IMMOMIO_GRAPHQL_URL = "https://gql-ps.immomio.com/tenant/graphql"
+
+
+def _extract_immomio_homepage_token(url: str) -> Optional[str]:
+    """Extract `token` query param from a homepage.immomio.com landlord URL.
+    Returns the token string, or None if the URL is not a homepage-token URL.
+    """
+    if 'homepage.immomio.com' not in url:
         return None
+    m = re.search(r'[?&]token=([A-Za-z0-9_\-\.]+)', url)
+    return m.group(1) if m else None
+
+IMMOMIO_PROPERTY_QUERY = """
+query Property($id: ID!) {
+  property(id: $id) {
+    id
+    status
+    applyLink
+    customer { name logo }
+    data {
+      name
+      size
+      rooms
+      halfRooms
+      totalRentGross
+      basePrice
+      customerName
+      customerLogo
+      address { city street houseNumber zipCode region country }
+      attachments { url title type }
+    }
+  }
+}
+"""
+
+
+def parse_immomio_listing(url: str, raise_errors: bool = False) -> Optional[dict]:
+    """Parse a single immomio.com/apply/{uuid} listing via Immomio's public GraphQL API.
+    No Chromium / Playwright required.
+    """
+    uuid_match = re.search(r'/apply/([a-f0-9\-]+)', url, re.IGNORECASE)
+    if not uuid_match:
+        if raise_errors:
+            raise ValueError(f"Could not extract listing UUID from URL: {url}")
+        return None
+    listing_id = uuid_match.group(1)
+
     try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            context = browser.new_context(
-                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                locale='de-DE'
-            )
-            page = context.new_page()
-            
-            try:
-                page.goto(url, timeout=30000, wait_until='domcontentloaded')
-                page.wait_for_timeout(6000)
-                
-                html = page.content()
-                text = page.evaluate('document.body.innerText')
-                
-                # Get image URLs
-                img_srcs = page.evaluate('''
-                    Array.from(document.querySelectorAll('img')).map(img => img.src)
-                ''')
-            finally:
-                browser.close()
-        
-        # Extract UUID from URL
-        uuid_match = re.search(r'/apply/([a-f0-9-]+)', url)
-        if not uuid_match:
-            return None
-        listing_id = uuid_match.group(1)
-        
-        # Check if listing is still active (no error page)
-        if 'Diese Seite existiert nicht' in text or 'Anzeige wurde entfernt' in text or len(text) < 200:
-            logger.info(f"Listing not active: {url}")
-            return None
-        
-        # Extract title from h1
-        h1_match = re.search(r'<h1[^>]*>([^<]+)</h1>', html)
-        title = h1_match.group(1).strip() if h1_match else "Wohnung in Hamburg"
-        
-        # Extract address - German pattern with PLZ
-        address = None
-        # Get all matches and clean each
-        addr_matches = re.findall(r'([^\n]+?\d+[a-zA-Z]?,\s*\d{5}\s+Hamburg(?:,\s*Deutschland)?)', text)
-        if addr_matches:
-            cleaned = []
-            for m in addr_matches:
-                # If contains newline, take only the part after last newline
-                if '\n' in m:
-                    m = m.split('\n')[-1].strip()
-                # Skip if too long (likely contains title)
-                if len(m) < 120:
-                    cleaned.append(m.strip())
-            if cleaned:
-                address = min(cleaned, key=len)
-        
-        # Extract district
-        district = None
-        dist_match = re.search(r'in\s+([A-ZÄÖÜ][a-zäöüß\-]+?)(?:\s+zu\s+vermieten|\s*$)', title)
-        if dist_match:
-            district = dist_match.group(1).strip()
-        if not district:
-            dist_match = re.search(r'Hamburg-([A-ZÄÖÜ][a-zäöüß\-]+)', title)
-            if dist_match:
-                district = dist_match.group(1)
-        
-        # Extract price - "Gesamtmiete (in €)" followed by value
-        price = None
-        gesamt_match = re.search(r'Gesamtmiete\s*\(in\s*€\)\s*\n?\s*([\d.]+,\d{2})\s*€', text)
-        if gesamt_match:
-            price_str = gesamt_match.group(1).replace('.', '').replace(',', '.')
-            try:
-                price = float(price_str)
-            except ValueError:
-                pass
-        # Fallback: "X,XX € mtl"
-        if price is None:
-            mtl_match = re.search(r'([\d.]+,\d{2})\s*€\s*mtl', text)
-            if mtl_match:
-                price_str = mtl_match.group(1).replace('.', '').replace(',', '.')
-                try:
-                    price = float(price_str)
-                except ValueError:
-                    pass
-        
-        # Extract area - "XX,XX m²" or "XX,XX m\n2" (immomio splits the ²)
-        area = None
-        # First try with space + newline 2 (immomio specific)
-        wohn_match = re.search(r'([\d]+(?:,\d+)?)\s*m\s*\n\s*2\b', text)
-        if wohn_match:
-            try:
-                area = float(wohn_match.group(1).replace(',', '.'))
-            except ValueError:
-                pass
-        if area is None:
-            area_match = re.search(r'([\d]+(?:,\d+)?)\s*m²', text)
-            if area_match:
-                try:
-                    area = float(area_match.group(1).replace(',', '.'))
-                except ValueError:
-                    pass
-        
-        # Extract rooms
-        rooms = None
-        # First try "X-Zimmer" pattern in title
-        title_rooms = re.search(r'(\d+)(\s*1/2)?\s*[-\s]?Zimmer', title)
-        if title_rooms:
-            base = float(title_rooms.group(1))
-            if title_rooms.group(2):
-                base += 0.5
-            rooms = base
-        
-        if rooms is None:
-            # Try "X ganzes" / "X halbes" pattern (immomio standard)
-            ganze_match = re.search(r'(\d+)\s+ganz', text)
-            halbes_match = re.search(r'(\d+)\s+halbe', text)
-            if ganze_match:
-                rooms = float(ganze_match.group(1))
-                if halbes_match:
-                    rooms += float(halbes_match.group(1)) * 0.5
-        
-        if rooms is None:
-            # Try "Anzahl Zimmer X"
-            anzahl_match = re.search(r'Anzahl\s+Zimmer\s*\n?\s*([\d,]+)', text)
-            if anzahl_match:
-                try:
-                    rooms = float(anzahl_match.group(1).replace(',', '.'))
-                except ValueError:
-                    pass
-        
-        # Extract landlord
-        landlord = None
-        landlord_match = re.search(r'Angebot\s+von:?\s*\n\s*([^\n]+?)(?:\n|$)', text)
-        if landlord_match:
-            landlord = landlord_match.group(1).strip()[:150]
-        
-        # Extract main image - largest non-logo immomio image
-        image_url = None
-        for src in img_srcs:
-            if 'immomio-prod-img-storage' in src and 'logo' not in src.lower() and '.svg' not in src.lower():
-                image_url = src
-                break
-        
-        return {
-            "id": listing_id,
-            "title": title,
-            "price": price,
-            "rooms": rooms,
-            "area": area,
-            "district": district,
-            "address": address,
-            "url": url,
-            "image_url": image_url,
-            "landlord": landlord,
-            "found_at": datetime.now(timezone.utc),
-            "status": "new"
-        }
-    
+        resp = requests.post(
+            IMMOMIO_GRAPHQL_URL,
+            json={"query": IMMOMIO_PROPERTY_QUERY, "variables": {"id": listing_id}},
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Origin": "https://tenant.immomio.com",
+                "Referer": "https://tenant.immomio.com/",
+            },
+            timeout=20,
+        )
+        resp.raise_for_status()
+        payload = resp.json()
     except Exception as e:
-        logger.error(f"Error parsing {url}: {str(e)}")
+        logger.error(f"Immomio GraphQL request failed for {url}: {e}")
+        if raise_errors:
+            raise
         return None
+
+    if payload.get("errors"):
+        err_msg = "; ".join(err.get("message", "?") for err in payload["errors"])
+        logger.error(f"Immomio GraphQL errors for {url}: {err_msg}")
+        if raise_errors:
+            raise RuntimeError(f"Immomio GraphQL error: {err_msg}")
+        return None
+
+    prop = (payload.get("data") or {}).get("property")
+    if not prop:
+        logger.info(f"Listing not active / not found: {url}")
+        if raise_errors:
+            raise RuntimeError("Wohnung nicht gefunden oder bereits offline")
+        return None
+
+    data = prop.get("data") or {}
+
+    # Title
+    title = (data.get("name") or "").strip() or "Wohnung in Hamburg"
+
+    # Rooms (Zimmer + halbe Zimmer)
+    rooms = data.get("rooms")
+    half_rooms = data.get("halfRooms")
+    if rooms is not None:
+        try:
+            rooms = float(rooms)
+            if half_rooms:
+                rooms += float(half_rooms) * 0.5
+        except (TypeError, ValueError):
+            rooms = None
+            # Area
+    area = data.get("size")
+    if area is not None:
+        try:
+            area = float(area)
+        except (TypeError, ValueError):
+            area = None
+
+    # Price (total rent gross, fallback to base price)
+    price = data.get("totalRentGross") or data.get("basePrice")
+    if price is not None:
+        try:
+            price = float(price)
+        except (TypeError, ValueError):
+            price = None
+
+    # Address - "Street Nr, PLZ City"
+    address = None
+    district = None
+    addr = data.get("address") or {}
+    street = (addr.get("street") or "").strip()
+    house_no = (addr.get("houseNumber") or "").strip()
+    zip_code = (addr.get("zipCode") or "").strip()
+    city = (addr.get("city") or "").strip()
+    if street or zip_code or city:
+        parts = []
+        street_part = (street + (f" {house_no}" if house_no else "")).strip()
+        if street_part:
+            parts.append(street_part)
+        city_part = (f"{zip_code} {city}".strip())
+        if city_part:
+            parts.append(city_part)
+        address = ", ".join(parts) if parts else None
+
+    # District from title ("3-Zimmer Wohnung in Steilshoop")
+    dist_match = re.search(r'\bin\s+([A-ZÄÖÜ][A-Za-zÄÖÜäöüß\-]+)', title)
+    if dist_match:
+        district = dist_match.group(1).strip()
+    if not district:
+        dist_match = re.search(r'Hamburg-([A-ZÄÖÜ][A-Za-zÄÖÜäöüß\-]+)', title)
+        if dist_match:
+            district = dist_match.group(1)
+
+    # Image - first IMG attachment
+    image_url = None
+    for att in (data.get("attachments") or []):
+        if att.get("type") == "IMG" and att.get("url"):
+            image_url = att["url"]
+            break
+    if not image_url:
+        image_url = data.get("customerLogo") or (prop.get("customer") or {}).get("logo")
+
+    # Landlord
+    landlord = (
+        data.get("customerName")
+        or (prop.get("customer") or {}).get("name")
+    )
+    if landlord:
+        landlord = landlord.strip()[:150]
+
+    return {
+        "id": listing_id,
+        "title": title,
+        "price": price,
+        "rooms": rooms,
+        "area": area,
+        "district": district,
+        "address": address,
+        "url": url,
+        "image_url": image_url,
+        "landlord": landlord,
+        "found_at": datetime.now(timezone.utc),
+        "status": "new",
+    }
 
 
 def _scrape_landlord_pages(start_url: str, detail_link_pattern: str, base_url: str, source_name: str, max_pages: int = 30) -> List[str]:
@@ -696,7 +703,7 @@ def scrape_immomio_landlord_token(landlord_name: str, token: str) -> List[dict]:
         for node in nodes:
             # Only apartments/houses, skip GARAGE/parking spots
             ptype = node.get('propertyType', '').upper()
-            if ptype in ('GARAGE', 'PARKING', 'GEWERBE', 'OFFICE', 'STORAGE'):
+            if ptype in ('GARAGE', 'PARKING', 'GEWERBE', 'OFFICE', 'STORAGE', 'COMMERCIAL'):
                 continue
             
             apply_link = node.get('applicationLink')
@@ -1168,20 +1175,32 @@ async def scrape_immomio_hamburg():
         except Exception as e:
             logger.error(f"GCV failed: {e}")
         
-        # === STEP 4: Manual URLs from database ===
+        # === STEP 4: Manual URLs from database (apply + homepage-token) ===
         manual_urls = await db.manual_urls.find({}, {"_id": 0}).to_list(100)
+        manual_apply_urls = []
         for item in manual_urls:
-            all_urls.add(item['url'])
+            mu_url = item['url']
+            token = _extract_immomio_homepage_token(mu_url)
+            if token:
+                # Landlord-pool URL: fetch ALL Hamburg apartments for this token
+                try:
+                    name = item.get('label') or f"Manual:{token[:8]}"
+                    token_apts = await asyncio.to_thread(scrape_immomio_landlord_token, name, token)
+                    apartments.extend(token_apts)
+                except Exception as e:
+                    logger.error(f"Manual token URL failed for {mu_url}: {e}")
+            else:
+                manual_apply_urls.append(item)
+                all_urls.add(mu_url)
         
-        logger.info(f"Playwright/manual URLs to process: {len(all_urls)}")
+        logger.info(f"Manual apply URLs to process: {len(all_urls)}")
         
-        # Parse each unique URL via Playwright (only ones not already from GraphQL)
         existing_ids = {a['id'] for a in apartments}
         for url in all_urls:
             normalized_url = url.replace('/de/apply/', '/apply/')
             uuid_match = re.search(r'/apply/([a-f0-9-]+)', normalized_url)
             if uuid_match and uuid_match.group(1) in existing_ids:
-                continue  # Already have it from GraphQL
+                continue
             
             try:
                 apartment = await asyncio.to_thread(parse_immomio_listing, normalized_url)
@@ -1196,7 +1215,7 @@ async def scrape_immomio_hamburg():
                 (apartment.get('address') and 'Hamburg' in apartment['address']) or
                 ('Hamburg' in apartment.get('title', ''))
             )
-            is_manual = any(item['url'].replace('/de/apply/', '/apply/') == normalized_url for item in manual_urls)
+            is_manual = any(item['url'].replace('/de/apply/', '/apply/') == normalized_url for item in manual_apply_urls)
             
             if is_hamburg or is_manual:
                 apartments.append(apartment)
@@ -1501,61 +1520,97 @@ async def list_manual_urls(admin: dict = Depends(get_admin_user)):
 
 @api_router.post("/admin/manual-urls")
 async def add_manual_url(data: ManualUrlAdd, admin: dict = Depends(get_admin_user)):
-    if 'tenant.immomio.com/apply/' not in data.url and 'tenant.immomio.com/de/apply/' not in data.url:
-        raise HTTPException(status_code=400, detail="URL must be from tenant.immomio.com/apply/")
-    
-    # Check duplicates
+    is_apply = 'tenant.immomio.com/apply/' in data.url or 'tenant.immomio.com/de/apply/' in data.url
+    homepage_token = _extract_immomio_homepage_token(data.url)
+    if not is_apply and not homepage_token:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "URL muss tenant.immomio.com/apply/{uuid} oder "
+                "homepage.immomio.com/de/properties?token=... sein"
+            ),
+        )
+
     existing = await db.manual_urls.find_one({"url": data.url})
     if existing:
         raise HTTPException(status_code=400, detail="URL already added")
-    
+
+    url_type = "homepage_token" if homepage_token else "apply"
     await db.manual_urls.insert_one({
         "url": data.url,
+        "type": url_type,
         "added_at": datetime.now(timezone.utc).isoformat()
     })
-    
-    # ===== IMMEDIATELY parse this URL so the apartment shows up on the dashboard =====
-    normalized_url = data.url.replace('/de/apply/', '/apply/')
+
     apartment_payload = None
+    apartments_count = 0
     parse_error = None
+
     try:
-        apartment = await asyncio.to_thread(parse_immomio_listing, normalized_url)
-        if apartment:
-            apt_dict = apartment.copy()
-            if isinstance(apt_dict.get('found_at'), datetime):
-                apt_dict['found_at'] = apt_dict['found_at'].isoformat()
-
-            existing_apt = await db.apartments.find_one({"id": apt_dict["id"]}, {"_id": 0})
-            if not existing_apt:
-                await db.apartments.insert_one(apt_dict)
-                logger.info(f"[manual-url] New apartment inserted: {apt_dict.get('title')} ({apt_dict['id']})")
+        if homepage_token:
+            name = f"Manual:{homepage_token[:8]}"
+            apts = await asyncio.to_thread(scrape_immomio_landlord_token, name, homepage_token)
+            if not apts:
+                parse_error = (
+                    "Token gültig, aber aktuell keine Hamburg-Wohnungen verfügbar. "
+                    "Neue Wohnungen werden beim nächsten Scan (alle 3 Min) automatisch erkannt."
+                )
             else:
-                # Fill in any missing fields we now know
-                update_fields = {}
-                for field in ['price', 'rooms', 'area', 'district', 'address', 'image_url', 'landlord', 'title']:
-                    if apt_dict.get(field) is not None and existing_apt.get(field) in (None, ""):
-                        update_fields[field] = apt_dict[field]
-                if update_fields:
-                    await db.apartments.update_one({"id": apt_dict["id"]}, {"$set": update_fields})
-                    logger.info(f"[manual-url] Updated apartment {apt_dict['id']} fields: {list(update_fields.keys())}")
-
-            # Strip _id and broadcast over WebSocket so all open dashboards see it live
-            apartment_payload = {k: v for k, v in apt_dict.items() if k != '_id'}
-            try:
-                await ws_manager.broadcast({"type": "new_apartment", "apartment": apartment_payload})
-            except Exception as e:
-                logger.debug(f"WS broadcast (manual-url) failed: {e}")
+                for apt in apts:
+                    apt_dict = apt.copy()
+                    if isinstance(apt_dict.get('found_at'), datetime):
+                        apt_dict['found_at'] = apt_dict['found_at'].isoformat()
+                    existing_apt = await db.apartments.find_one({"id": apt_dict["id"]}, {"_id": 0})
+                    if not existing_apt:
+                        await db.apartments.insert_one(apt_dict)
+                        apartments_count += 1
+                        try:
+                            payload = {k: v for k, v in apt_dict.items() if k != '_id'}
+                            await ws_manager.broadcast({"type": "new_apartment", "apartment": payload})
+                        except Exception as e:
+                            logger.debug(f"WS broadcast (token-url) failed: {e}")
+                logger.info(
+                    f"[manual-url] Homepage token: {apartments_count} new (total {len(apts)}) from {homepage_token[:16]}..."
+                )
         else:
-            parse_error = "Listing konnte nicht geladen werden (möglicherweise abgelaufen oder offline)"
-            logger.warning(f"[manual-url] parse_immomio_listing returned None for {normalized_url}")
+            normalized_url = data.url.replace('/de/apply/', '/apply/')
+            apartment = await asyncio.to_thread(parse_immomio_listing, normalized_url, True)
+            if apartment:
+                apt_dict = apartment.copy()
+                if isinstance(apt_dict.get('found_at'), datetime):
+                    apt_dict['found_at'] = apt_dict['found_at'].isoformat()
+
+                existing_apt = await db.apartments.find_one({"id": apt_dict["id"]}, {"_id": 0})
+                if not existing_apt:
+                    await db.apartments.insert_one(apt_dict)
+                    apartments_count = 1
+                    logger.info(f"[manual-url] New apartment: {apt_dict.get('title')} ({apt_dict['id']})")
+                else:
+                    update_fields = {}
+                    for field in ['price', 'rooms', 'area', 'district', 'address', 'image_url', 'landlord', 'title']:
+                        if apt_dict.get(field) is not None and existing_apt.get(field) in (None, ""):
+                            update_fields[field] = apt_dict[field]
+                    if update_fields:
+                        await db.apartments.update_one({"id": apt_dict["id"]}, {"$set": update_fields})
+
+                apartment_payload = {k: v for k, v in apt_dict.items() if k != '_id'}
+                try:
+                    await ws_manager.broadcast({"type": "new_apartment", "apartment": apartment_payload})
+                except Exception as e:
+                    logger.debug(f"WS broadcast (manual-url) failed: {e}")
+            else:
+                parse_error = "Listing konnte nicht geladen werden (möglicherweise abgelaufen oder offline)"
     except Exception as e:
-        parse_error = str(e)
-        logger.error(f"[manual-url] Parse error for {normalized_url}: {e}")
+        err_text = str(e).splitlines()[0][:300] if str(e) else type(e).__name__
+        parse_error = err_text
+        logger.error(f"[manual-url] Parse error for {data.url}: {e}")
 
     return {
         "message": "URL added",
         "url": data.url,
+        "type": url_type,
         "apartment": apartment_payload,
+        "apartments_count": apartments_count,
         "parse_error": parse_error,
     }
 
